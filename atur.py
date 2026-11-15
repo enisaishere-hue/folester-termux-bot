@@ -6,6 +6,7 @@ dengan: ./mulai  (atau: python3 bot.py)
 """
 import json
 import os
+import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CFG_PATH = os.path.join(HERE, "config.json")
@@ -30,9 +31,22 @@ def _load():
         return {}
 
 
+def _cek_keypair(path):
+    """Cek file keypair bisa dibaca bot (JSON 64 angka atau 1 baris base58).
+    Kembalikan None kalau valid, atau pesan error kalau tidak."""
+    try:
+        sys.path.insert(0, HERE)
+        import bot as _bot
+        _bot.load_keypair(os.path.expanduser(path))
+        return None
+    except Exception as e:
+        return str(e)
+
+
 def _tanya_keypair(cfg):
-    """Tanya path file keypair. Tolak private key langsung dan path yang
-    tidak ada — bot hanya mau baca file, bukan key yang ditempel."""
+    """Tanya path file keypair. Tolak private key langsung, path yang
+    tidak ada, dan file yang isinya bukan keypair — bot hanya mau baca
+    file keypair yang valid, bukan key yang ditempel."""
     lama = cfg.get("keypair", DEFAULTS["keypair"])
     while True:
         raw = input(f"File keypair (path file key di HP kamu) [{lama}]: ").strip()
@@ -47,6 +61,11 @@ def _tanya_keypair(cfg):
         if not os.path.isfile(os.path.expanduser(p)):
             print(f"  File tidak ditemukan: {p}")
             print("  Cek lagi path-nya, atau simpan dulu key-nya ke file.")
+            continue
+        err = _cek_keypair(p)
+        if err:
+            print(f"  File itu bukan keypair yang valid: {err}")
+            print("  Isi file harus keypair Solana (JSON 64 angka) atau 1 baris private key base58.")
             continue
         return p
 
