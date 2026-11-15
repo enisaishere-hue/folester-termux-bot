@@ -53,6 +53,8 @@
 #   --reserve 100    = berhenti kalau saldo ANUL di bawah 100
 #   --max-age 120    = cuma beli Frame yang umurnya <=120 detik saat ketemu
 #   --once           = cek sekali lalu keluar (buat ngetes)
+#   retry otomatis    = kalau jaringan gagal sesaat (DNS/timeout/server sibuk),
+#                       tiap request dicoba ulang 5x sebelum bot menyerah
 # ============================================================================
 import argparse
 import base64
@@ -199,6 +201,14 @@ def log(msg):
         pass
 
 
+# Berapa kali curl dicoba ulang kalau jaringannya gagal sesaat (DNS, putus,
+# timeout, server 5xx). Bukan untuk error 4xx (login salah, tidak lolos
+# syarat, dsb.) — itu langsung gagal supaya tidak buang waktu.
+RETRY_ATTEMPTS = 5
+RETRYABLE_CURL_RC = {6, 7, 28, 35, 47, 52, 56}
+RETRYABLE_HTTP = {429, 500, 502, 503, 504}
+
+
 def curl_json(url, method="GET", data=None, use_cookies=False):
     cmd = ["curl", "-s", "--max-time", "20", "-A", UA, "-w", "\n%{http_code}"]
     if use_cookies:
@@ -208,25 +218,43 @@ def curl_json(url, method="GET", data=None, use_cookies=False):
         if data is not None:
             cmd += ["-d", json.dumps(data)]
     cmd.append(url)
-    out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    if out.returncode != 0:
-        raise RuntimeError(f"curl {method} {url} gagal rc={out.returncode}: {out.stderr.strip()[:200]}")
-    body, _, status = out.stdout.rpartition("\n")
-    try:
-        code = int(status.strip())
-    except ValueError:
-        code = 0
-    if code >= 400:
+    last_err = RuntimeError(f"curl {method} {url} gagal tanpa balasan")
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
         try:
-            err = json.loads(body)
-            detail = err.get("error") or err
-        except (json.JSONDecodeError, AttributeError):
-            detail = body[:200]
-        raise RuntimeError(f"HTTP {code} dari {url}: {detail}")
-    try:
-        return json.loads(body)
-    except json.JSONDecodeError:
-        raise RuntimeError(f"balasan bukan JSON dari {url}: {body[:200]}")
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            last_err = RuntimeError(f"curl {method} {url} timeout (>30 dtk)")
+            out = None
+        if out is not None:
+            if out.returncode != 0:
+                last_err = RuntimeError(f"curl {method} {url} gagal rc={out.returncode}: {out.stderr.strip()[:200]}")
+                if out.returncode not in RETRYABLE_CURL_RC:
+                    raise last_err
+            else:
+                body, _, status = out.stdout.rpartition("\n")
+                try:
+                    code = int(status.strip())
+                except ValueError:
+                    code = 0
+                if code >= 400:
+                    try:
+                        err = json.loads(body)
+                        detail = err.get("error") or err
+                    except (json.JSONDecodeError, AttributeError):
+                        detail = body[:200]
+                    last_err = RuntimeError(f"HTTP {code} dari {url}: {detail}")
+                    if code not in RETRYABLE_HTTP:
+                        raise last_err
+                else:
+                    try:
+                        return json.loads(body)
+                    except json.JSONDecodeError:
+                        raise RuntimeError(f"balasan bukan JSON dari {url}: {body[:200]}")
+        if attempt < RETRY_ATTEMPTS:
+            wait = 2 ** (attempt - 1)
+            log(f"jaringan gagal ({last_err}), coba lagi {attempt + 1}/{RETRY_ATTEMPTS} setelah {wait} dtk")
+            time.sleep(wait)
+    raise last_err
 
 
 # ---------------------------------------------------------------------------
