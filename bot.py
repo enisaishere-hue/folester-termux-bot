@@ -62,6 +62,15 @@
 #      lalu jalankan dengan:  nohup python3 bot.py --keypair ~/.config/solana/id.json --amount 100 > folester.log 2>&1 &
 #   4. Berhenti:  pkill -f bot.py
 #
+# 2 AKUN SEKALIGUS (mis. BacJ + AKG8): jalankan 2 proses, masing-masing
+# dengan file keypair, file cookie, dan file log sendiri:
+#   mv ~/bacj-key.txt ~/akg8-key.txt   (file lama isinya key AKG8)
+#   (export key BacJ dari Phantom, simpan ke ~/bacj-key.txt)
+#   nohup python3 bot.py --keypair ~/akg8-key.txt --amount 100 --cookies ~/.folester-akg8.txt > folester-akg8.log 2>&1 &
+#   nohup python3 bot.py --keypair ~/bacj-key.txt --amount 100 --cookies ~/.folester-bacj.txt > folester-bacj.log 2>&1 &
+# Cek tiap bot: tail -f folester-akg8.log  /  tail -f folester-bacj.log
+# Pastikan baris "wallet=..." di tiap log cocok dengan akunnya.
+#
 # OPSI (boleh diubah):
 #   --amount 100     = beli 100 ANUL tiap Frame baru (minimal 1)
 #   --interval 30    = cek daftar Frame tiap 30 detik (jalur polling cadangan)
@@ -72,6 +81,9 @@
 #   --max-age 120    = cuma beli Frame yang umurnya <=120 detik saat ketemu
 #   --buy-delay 0.5  = beli saat Frame berumur 0,5 detik setelah launch
 #   --launch-wait-retry 0.5 = jeda detik antar coba ulang saat server bilang launch_wait
+#   --cookies FILE   = file cookie sesi (default ~/.folester_session_cookies.txt).
+#                      WAJIB beda tiap akun kalau jalan 2 bot sekaligus —
+#                      kalau sama, sesinya saling timpa dan bot login melulu.
 #   --once           = cek sekali lalu keluar (buat ngetes)
 #   retry otomatis    = kalau jaringan gagal sesaat (DNS/timeout/server sibuk),
 #                       tiap request dicoba ulang 5x sebelum bot menyerah
@@ -818,9 +830,13 @@ def main():
     ap.add_argument("--max-age", type=int, default=120, help="cuma beli Frame umur <= sekian detik")
     ap.add_argument("--buy-delay", type=float, default=0.5, help="beli saat Frame berumur sekian detik setelah launch (default 0.5)")
     ap.add_argument("--launch-wait-retry", type=float, default=0.5, help="jeda detik antar coba ulang saat server bilang launch_wait")
+    ap.add_argument("--cookies", default=None, help="file cookie sesi (default ~/.folester_session_cookies.txt; wajib beda tiap akun kalau jalan 2 bot sekaligus)")
     ap.add_argument("--once", action="store_true", help="cek sekali lalu keluar")
     ap.add_argument("--check-only", action="store_true", help="cuma login + cek saldo, tanpa beli")
     a = ap.parse_args()
+    global COOKIE_FILE
+    if a.cookies:
+        COOKIE_FILE = os.path.expanduser(a.cookies)
     if a.amount < 1:
         print("amount minimal 1 ANUL", file=sys.stderr)
         return 2

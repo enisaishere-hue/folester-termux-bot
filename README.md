@@ -97,8 +97,30 @@ Opsi lain: `--amount 100` (ANUL per Frame), `--interval 30` (detik antar cek
 polling cadangan), `--no-ws` (matikan websocket), `--max-buys 50`, `--budget 5000`,
 `--reserve 100`, `--max-age 120`, `--buy-delay 0.5` (beli saat Frame berumur
 0,5 detik setelah launch), `--launch-wait-retry 0.5` (jeda detik antar coba ulang
-saat server bilang `launch_wait`), `--once` (cek sekali), `--check-only`
-(cuma login + cek saldo).
+saat server bilang `launch_wait`), `--cookies FILE` (file cookie sesi, wajib
+beda tiap akun kalau jalan 2 bot sekaligus), `--once` (cek sekali),
+`--check-only` (cuma login + cek saldo).
+
+## 2 akun sekaligus
+
+Jalankan 2 proses — masing-masing dengan file keypair, file cookie, dan file
+log sendiri:
+
+```sh
+# File ~/bacj-key.txt yang lama isinya key AKG8 — ganti nama dulu:
+mv ~/bacj-key.txt ~/akg8-key.txt
+# Export key BacJ dari Phantom, simpan ke ~/bacj-key.txt (jangan kirim ke siapa pun)
+pkill -f bot.py
+cd ~/folester-termux-bot && git pull
+nohup python3 bot.py --keypair ~/akg8-key.txt --amount 100 --cookies ~/.folester-akg8.txt > folester-akg8.log 2>&1 &
+nohup python3 bot.py --keypair ~/bacj-key.txt --amount 100 --cookies ~/.folester-bacj.txt > folester-bacj.log 2>&1 &
+```
+
+Cek tiap bot: `tail -f folester-akg8.log` / `tail -f folester-bacj.log` —
+pastikan baris `wallet=...` di tiap log cocok dengan akunnya. Kalau
+`--cookies`-nya sama, sesi kedua bot saling timpa dan keduanya login melulu.
+Sebelum jalanin akun baru, cek dulu alamatnya:
+`python3 bot.py --keypair ~/bacj-key.txt --check-only`.
 
 ## Keamanan
 
