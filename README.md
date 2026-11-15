@@ -14,7 +14,10 @@ beli pakai saldo `$ANUL` simulasi — bukan SOL asli, bukan transaksi blockchain
 4. Poll daftar Frame tiap 0,5 detik. Kalau ada Frame baru (umur ≤ 120 detik),
    langsung beli **100 ANUL**. Berhenti setelah 50 kali beli, total 5.000 ANUL,
    atau saldo di bawah 100 ANUL. Kalau jaringan gagal sesaat (DNS, timeout,
-   server sibuk), tiap request dicoba ulang 5x sebelum bot menyerah.
+   server sibuk), tiap request dicoba ulang 5x sebelum bot menyerah. Bot juga
+   menulis kabar berkala tiap 3 detik di log (cek ke-berapa, Frame terbaru,
+   jumlah beli, saldo) supaya kelihatan masih jalan; intervalnya bisa diubah
+   dengan `--heartbeat` (0 = mati).
 
 ## Instal di Termux
 

@@ -55,6 +55,7 @@
 #   --once           = cek sekali lalu keluar (buat ngetes)
 #   retry otomatis    = kalau jaringan gagal sesaat (DNS/timeout/server sibuk),
 #                       tiap request dicoba ulang 5x sebelum bot menyerah
+#   --heartbeat 3    = kabar berkala tiap 3 detik di log (bukti bot masih jalan)
 # ============================================================================
 import argparse
 import base64
@@ -408,6 +409,7 @@ def main():
     ap.add_argument("--keypair", required=True, help="path file keypair Solana, mis. ~/.config/solana/id.json")
     ap.add_argument("--amount", type=float, default=100, help="ANUL per Frame baru (min 1)")
     ap.add_argument("--interval", type=float, default=0.5, help="detik antar cek")
+    ap.add_argument("--heartbeat", type=float, default=3, help="detik antar kabar berkala di log (0 = mati)")
     ap.add_argument("--max-buys", type=int, default=50, help="berhenti setelah sekian beli")
     ap.add_argument("--budget", type=float, default=5000, help="total ANUL maksimal yang dibelanjakan")
     ap.add_argument("--reserve", type=float, default=100, help="berhenti kalau saldo < ini")
@@ -444,7 +446,18 @@ def main():
     spent, buys = 0.0, 0
     state = {"reauth_done": False}
     first = True
+    polls = 0
+    last_beat = time.monotonic()
+    latest_ts, latest_name = "", "-"
     while True:
+        if a.heartbeat > 0 and time.monotonic() - last_beat >= a.heartbeat:
+            try:
+                age = (datetime.now(timezone.utc) - datetime.fromisoformat(latest_ts.replace("Z", "+00:00"))).total_seconds()
+                age_s = f"{age:.0f} dtk lalu"
+            except (ValueError, TypeError):
+                age_s = "?"
+            log(f"memantau... cek ke-{polls} | Frame terbaru: {latest_name} ({age_s}) | beli: {buys} | saldo: ~{balance - spent:.2f} ANUL")
+            last_beat = time.monotonic()
         try:
             frames = fetch_frames()
         except Exception as e:
@@ -453,6 +466,12 @@ def main():
                 return 1
             time.sleep(a.interval)
             continue
+        polls += 1
+        for f in frames:
+            ts = f.get("created_at") or ""
+            if ts > latest_ts:
+                latest_ts = ts
+                latest_name = f.get("name", "?")
         now = datetime.now(timezone.utc)
         for f in frames:
             if f["id"] in seen:
