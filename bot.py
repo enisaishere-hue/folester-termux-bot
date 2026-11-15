@@ -456,7 +456,7 @@ def main():
                 age_s = f"{age:.0f} dtk lalu"
             except (ValueError, TypeError):
                 age_s = "?"
-            log(f"memantau... cek ke-{polls} | Frame terbaru: {latest_name} ({age_s}) | beli: {buys} | saldo: ~{balance - spent:.2f} ANUL")
+            log(f"memantau... cek ke-{polls} | Frame terbaru: {latest_name} ({age_s}) | beli: {buys} | saldo: ~{balance:.2f} ANUL")
             last_beat = time.monotonic()
         try:
             frames = fetch_frames()
@@ -486,8 +486,11 @@ def main():
             age = (now - created).total_seconds()
             if age < 0 or age > a.max_age:
                 continue
-            if buys >= a.max_buys or spent + a.amount > a.budget or balance - spent < a.reserve:
-                log(f"STOP: buys={buys} spent={spent:.2f} saldo~{balance - spent:.2f}")
+            # balance adalah saldo LIVE (diperbarui dari server tiap selesai beli),
+            # jadi cadangan dicek dari saldo setelah beli ini, bukan saldo dikurangi
+            # spent (itu menghitung dobel dan membuat bot berhenti terlalu cepat).
+            if buys >= a.max_buys or spent + a.amount > a.budget or balance - a.amount < a.reserve:
+                log(f"STOP: buys={buys} spent={spent:.2f} saldo~{balance:.2f}")
                 return 0
             log(f"FRAME BARU {f['name']} umur={age:.0f} dtk harga={f['price']:.6f} ANUL trades={f['trades']}")
             r = buy(f, a.amount, wallet, seed, state)
