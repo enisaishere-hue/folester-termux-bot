@@ -12,7 +12,11 @@
 #     1. WebSocket live /api/live — jalur UTAMA. Begitu ada trade pertama di
 #        Frame baru, server mengirimnya kurang dari ~1 detik setelah Frame
 #        dibuat (terverifikasi live 2026-11-15: trade pertama SOL mendarat
-#        1,1 detik setelah launching). Bot langsung beli.
+#        1,1 detik setelah launching). Bot beli tepat 1,5 detik setelah
+#        Frame dibuat (--buy-delay): kalau Frame terdeteksi lebih cepat,
+#        bot menunggu sampai umurnya 1,5 detik dulu baru beli. Kalau server
+#        menolak dengan launch_wait (trading Frame itu belum dibuka), bot
+#        coba lagi tiap 2 detik sampai umur Frame 120 detik.
 #     2. Polling daftar Frame tiap 30 detik — jalur CADANGAN. Kalau websocket
 #        putus, polling tetap jalan, jadi bot tidak pernah buta. Websocket
 #        yang putus disambung lagi otomatis (backoff 1-30 dtk).
@@ -38,9 +42,10 @@
 #     Airdrop 2 tapi konversinya belum diputuskan.
 #   - "Pembeli pertama" tidak bisa dijamin: trade pertama sebuah Frame
 #     mendarat ~1 detik setelah dibuat (biasanya AI trader situs / kreator),
-#     dan bot websocket membeli sesaat setelah trade pertama itu terlihat —
-#     jadi bot biasanya pembeli ke-2/ke-3, bukan ke-1. Polling saja lebih
-#     lambat (~2-4 detik).
+#     dan bot membeli 1,5 detik setelah Frame dibuat — jadi bot biasanya
+#     pembeli ke-2/ke-3, bukan ke-1. Kalau server masih bilang launch_wait,
+#     bot coba lagi tiap 2 detik sampai umur Frame 120 detik. Polling saja
+#     lebih lambat (tiap 30 detik).
 #   - Script ini cuma BELI. Jual tetap manual dari HP kamu.
 #   - Wallet yang dipakai HARUS lolos 3 dari 4 syarat Folester: umur >=90 hari,
 #     >=20 hari aktif, >=50 transaksi, saldo >=0,01 SOL. Wallet baru TIDAK
@@ -65,6 +70,8 @@
 #   --budget 5000    = berhenti setelah total belanja 5.000 ANUL
 #   --reserve 100    = berhenti kalau saldo ANUL di bawah 100
 #   --max-age 120    = cuma beli Frame yang umurnya <=120 detik saat ketemu
+#   --buy-delay 1.5  = beli saat Frame berumur 1,5 detik setelah launch
+#   --launch-wait-retry 2 = jeda detik antar coba ulang saat server bilang launch_wait
 #   --once           = cek sekali lalu keluar (buat ngetes)
 #   retry otomatis    = kalau jaringan gagal sesaat (DNS/timeout/server sibuk),
 #                       tiap request dicoba ulang 5x sebelum bot menyerah
@@ -762,37 +769,40 @@ def fetch_frames():
 
 
 def buy(frame, amount, wallet, seed, state):
+    """Satu percobaan beli. Kembalikan (status, hasil):
+    'ok' = berhasil, 'launch_wait' = server bilang Frame masih dalam masa
+    tunggu launch (coba lagi nanti, jangan anggap gagal), 'fail' = gagal lain."""
     body = {"frameId": frame["id"], "side": "buy", "amount": amount}
-    try:
-        r = http_json(f"{BASE}/api/play/trade", method="POST", data=body, use_cookies=True)
-    except RuntimeError as e:
-        if "sign_in_required" in str(e) and not state.get("reauth_done"):
-            log("sesi habis, login ulang...")
-            sign_in(wallet, seed)
-            state["reauth_done"] = True
-            try:
-                r = http_json(f"{BASE}/api/play/trade", method="POST", data=body, use_cookies=True)
-            except RuntimeError as e2:
-                log(f"BUY {frame['name']} gagal HTTP: {e2}")
-                return None
-        else:
-            log(f"BUY {frame['name']} gagal HTTP: {e}")
-            return None
-    if isinstance(r, dict) and r.get("error") == "sign_in_required" and not state.get("reauth_done"):
-        log("sesi habis, login ulang...")
-        sign_in(wallet, seed)
-        state["reauth_done"] = True
+    for _attempt in range(2):  # percobaan ke-2 hanya sesudah login ulang
         try:
             r = http_json(f"{BASE}/api/play/trade", method="POST", data=body, use_cookies=True)
         except RuntimeError as e:
+            if "launch_wait" in str(e):
+                log(f"BUY {frame['name']} masih launch_wait, coba lagi nanti")
+                return "launch_wait", None
+            if "sign_in_required" in str(e) and not state.get("reauth_done"):
+                log("sesi habis, login ulang...")
+                sign_in(wallet, seed)
+                state["reauth_done"] = True
+                continue
             log(f"BUY {frame['name']} gagal HTTP: {e}")
-            return None
-    if isinstance(r, dict) and r.get("error"):
-        log(f"BUY {frame['name']} ditolak: {r}")
-        return None
-    log(f"BUY {frame['name']} amount={amount} ANUL -> dapat {r.get('base')} token, "
-        f"harga {r.get('quote')} ANUL, fee {r.get('fee')}")
-    return r
+            return "fail", None
+        if isinstance(r, dict) and r.get("error"):
+            if r.get("error") == "launch_wait":
+                log(f"BUY {frame['name']} masih launch_wait, coba lagi nanti")
+                return "launch_wait", None
+            if r.get("error") == "sign_in_required" and not state.get("reauth_done"):
+                log("sesi habis, login ulang...")
+                sign_in(wallet, seed)
+                state["reauth_done"] = True
+                continue
+            log(f"BUY {frame['name']} ditolak: {r}")
+            return "fail", None
+        log(f"BUY {frame['name']} amount={amount} ANUL -> dapat {r.get('base')} token, "
+            f"harga {r.get('quote')} ANUL, fee {r.get('fee')}")
+        return "ok", r
+    log(f"BUY {frame['name']} gagal: sesi habis sesudah login ulang")
+    return "fail", None
 
 
 def main():
@@ -806,6 +816,8 @@ def main():
     ap.add_argument("--budget", type=float, default=5000, help="total ANUL maksimal yang dibelanjakan")
     ap.add_argument("--reserve", type=float, default=100, help="berhenti kalau saldo < ini")
     ap.add_argument("--max-age", type=int, default=120, help="cuma beli Frame umur <= sekian detik")
+    ap.add_argument("--buy-delay", type=float, default=1.5, help="beli saat Frame berumur sekian detik setelah launch (default 1.5)")
+    ap.add_argument("--launch-wait-retry", type=float, default=2.0, help="jeda detik antar coba ulang saat server bilang launch_wait")
     ap.add_argument("--once", action="store_true", help="cek sekali lalu keluar")
     ap.add_argument("--check-only", action="store_true", help="cuma login + cek saldo, tanpa beli")
     a = ap.parse_args()
@@ -835,6 +847,7 @@ def main():
         return 0
 
     seen = set()
+    pending = {}  # frame_id -> {frame, created, next_try}: antre retry launch_wait
     spent, buys = 0.0, 0
     state = {"reauth_done": False}
     first = True
@@ -870,8 +883,16 @@ def main():
         except ValueError:
             return False
         age = (now - created).total_seconds()
-        if age < 0 or age > a.max_age:
+        if age < -30 or age > a.max_age:
             return False
+        if age < 0:
+            age = 0  # jam HP sedikit tertinggal dari server, anggap baru lahir
+        # Target: beli tepat BUY_DELAY detik setelah launch. Kalau Frame
+        # terdeteksi lebih cepat (mis. lewat websocket), tunggu dulu sampai
+        # umurnya mencapai target; kalau sudah lebih tua, beli langsung.
+        if age < a.buy_delay:
+            time.sleep(a.buy_delay - age)
+            age = (datetime.now(timezone.utc) - created).total_seconds()
         # balance adalah saldo LIVE (diperbarui dari server tiap selesai beli),
         # jadi cadangan dicek dari saldo setelah beli ini, bukan saldo dikurangi
         # spent (itu menghitung dobel dan membuat bot berhenti terlalu cepat).
@@ -879,14 +900,51 @@ def main():
             log(f"STOP: buys={buys} spent={spent:.2f} saldo~{balance:.2f}")
             return True
         src = "WS" if is_live else "poll"
-        log(f"FRAME BARU {f['name']} umur={age:.0f} dtk harga={f['price']:.6f} ANUL trades={f.get('trades', 0)} [{src}]")
-        r = buy(f, a.amount, wallet, seed, state)
-        if r:
+        log(f"FRAME BARU {f['name']} umur={age:.1f} dtk harga={f['price']:.6f} ANUL trades={f.get('trades', 0)} [{src}]")
+        status, r = buy(f, a.amount, wallet, seed, state)
+        if status == "ok":
             buys += 1
             spent += a.amount
             balance = float(get_me(wallet).get("player", {}).get("balance") or balance - a.amount)
+        elif status == "launch_wait":
+            # Server belum membuka trading untuk Frame ini. Jangan anggap
+            # gagal: antrekan ulang sampai umurnya melewati max_age. Antrean
+            # ini dicek tiap putaran loop tanpa menghentikan deteksi Frame baru.
+            pending[f["id"]] = {"frame": f, "created": created,
+                                "next_try": time.monotonic() + a.launch_wait_retry}
+            log(f"antre retry {f['name']} (launch_wait), coba lagi {a.launch_wait_retry:.0f} dtk lagi")
         return False
 
+    def retry_pending(now):
+        """Coba lagi Frame yang antre karena launch_wait. Kembalikan True
+        kalau bot harus STOP."""
+        nonlocal buys, spent, balance
+        for fid in list(pending.keys()):
+            p = pending[fid]
+            if time.monotonic() < p["next_try"]:
+                continue
+            age = (now - p["created"]).total_seconds()
+            if age > a.max_age:
+                log(f"STOP retry {p['frame']['name']}: umur {age:.0f} dtk > max_age {a.max_age}")
+                del pending[fid]
+                continue
+            if buys >= a.max_buys or spent + a.amount > a.budget or balance - a.amount < a.reserve:
+                log(f"STOP: buys={buys} spent={spent:.2f} saldo~{balance:.2f}")
+                return True
+            log(f"retry BUY {p['frame']['name']} (umur {age:.0f} dtk)")
+            status, r = buy(p["frame"], a.amount, wallet, seed, state)
+            if status == "ok":
+                buys += 1
+                spent += a.amount
+                balance = float(get_me(wallet).get("player", {}).get("balance") or balance - a.amount)
+                del pending[fid]
+            elif status == "launch_wait":
+                p["next_try"] = time.monotonic() + a.launch_wait_retry
+            else:
+                del pending[fid]
+        return False
+
+    last_poll = 0.0
     while True:
         if a.heartbeat > 0 and time.monotonic() - last_beat >= a.heartbeat:
             try:
@@ -900,6 +958,8 @@ def main():
             log(f"memantau... cek ke-{polls} | Frame terbaru: {latest_name} ({age_s}) | beli: {buys} | saldo: ~{balance:.2f} ANUL{ws_bit}")
             last_beat = time.monotonic()
         # 1. Jalur websocket: Frame yang masuk live diproses dulu (paling cepat).
+        # Loop ini bangun tiap 0.2 dtk supaya antrean WS langsung diproses,
+        # tidak menunggu polling 30 detik.
         now = datetime.now(timezone.utc)
         while True:
             try:
@@ -909,28 +969,34 @@ def main():
             if process_frame(f, now, is_live=True):
                 ws_stop.set()
                 return 0
-        # 2. Jalur polling cadangan: daftar lengkap, kalau WS ketinggalan.
-        try:
-            frames = fetch_frames()
-        except Exception as e:
-            log(f"poll gagal: {e}")
-            if a.once:
-                ws_stop.set()
-                return 1
-            time.sleep(a.interval)
-            continue
-        polls += 1
-        now = datetime.now(timezone.utc)
-        for f in frames:
-            if process_frame(f, now):
-                ws_stop.set()
-                return 0
-        first = False
-        if a.once:
-            log(f"once selesai: buys={buys} spent={spent:.2f}")
+        # 2. Retry Frame yang masih launch_wait (tanpa blokir deteksi baru).
+        if retry_pending(now):
             ws_stop.set()
             return 0
-        time.sleep(a.interval)
+        # 3. Jalur polling cadangan tiap a.interval detik: daftar lengkap,
+        # kalau WS ketinggalan.
+        if time.monotonic() - last_poll >= a.interval:
+            last_poll = time.monotonic()
+            try:
+                frames = fetch_frames()
+            except Exception as e:
+                log(f"poll gagal: {e}")
+                if a.once:
+                    ws_stop.set()
+                    return 1
+            else:
+                polls += 1
+                now = datetime.now(timezone.utc)
+                for f in frames:
+                    if process_frame(f, now):
+                        ws_stop.set()
+                        return 0
+            first = False
+            if a.once:
+                log(f"once selesai: buys={buys} spent={spent:.2f}")
+                ws_stop.set()
+                return 0
+        time.sleep(0.2)
 
 
 if __name__ == "__main__":
