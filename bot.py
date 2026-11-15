@@ -12,11 +12,11 @@
 #     1. WebSocket live /api/live — jalur UTAMA. Begitu ada trade pertama di
 #        Frame baru, server mengirimnya kurang dari ~1 detik setelah Frame
 #        dibuat (terverifikasi live 2026-11-15: trade pertama SOL mendarat
-#        1,1 detik setelah launching). Bot beli tepat 1,5 detik setelah
+#        1,1 detik setelah launching). Bot beli tepat 0,5 detik setelah
 #        Frame dibuat (--buy-delay): kalau Frame terdeteksi lebih cepat,
-#        bot menunggu sampai umurnya 1,5 detik dulu baru beli. Kalau server
+#        bot menunggu sampai umurnya 0,5 detik dulu baru beli. Kalau server
 #        menolak dengan launch_wait (trading Frame itu belum dibuka), bot
-#        coba lagi tiap 2 detik sampai umur Frame 120 detik.
+#        coba lagi tiap 0,5 detik sampai umur Frame 120 detik.
 #     2. Polling daftar Frame tiap 30 detik — jalur CADANGAN. Kalau websocket
 #        putus, polling tetap jalan, jadi bot tidak pernah buta. Websocket
 #        yang putus disambung lagi otomatis (backoff 1-30 dtk).
@@ -42,9 +42,9 @@
 #     Airdrop 2 tapi konversinya belum diputuskan.
 #   - "Pembeli pertama" tidak bisa dijamin: trade pertama sebuah Frame
 #     mendarat ~1 detik setelah dibuat (biasanya AI trader situs / kreator),
-#     dan bot membeli 1,5 detik setelah Frame dibuat — jadi bot biasanya
+#     dan bot membeli 0,5 detik setelah Frame dibuat — jadi bot biasanya
 #     pembeli ke-2/ke-3, bukan ke-1. Kalau server masih bilang launch_wait,
-#     bot coba lagi tiap 2 detik sampai umur Frame 120 detik. Polling saja
+#     bot coba lagi tiap 0,5 detik sampai umur Frame 120 detik. Polling saja
 #     lebih lambat (tiap 30 detik).
 #   - Script ini cuma BELI. Jual tetap manual dari HP kamu.
 #   - Wallet yang dipakai HARUS lolos 3 dari 4 syarat Folester: umur >=90 hari,
@@ -70,8 +70,8 @@
 #   --budget 5000    = berhenti setelah total belanja 5.000 ANUL
 #   --reserve 100    = berhenti kalau saldo ANUL di bawah 100
 #   --max-age 120    = cuma beli Frame yang umurnya <=120 detik saat ketemu
-#   --buy-delay 1.5  = beli saat Frame berumur 1,5 detik setelah launch
-#   --launch-wait-retry 2 = jeda detik antar coba ulang saat server bilang launch_wait
+#   --buy-delay 0.5  = beli saat Frame berumur 0,5 detik setelah launch
+#   --launch-wait-retry 0.5 = jeda detik antar coba ulang saat server bilang launch_wait
 #   --once           = cek sekali lalu keluar (buat ngetes)
 #   retry otomatis    = kalau jaringan gagal sesaat (DNS/timeout/server sibuk),
 #                       tiap request dicoba ulang 5x sebelum bot menyerah
@@ -816,8 +816,8 @@ def main():
     ap.add_argument("--budget", type=float, default=5000, help="total ANUL maksimal yang dibelanjakan")
     ap.add_argument("--reserve", type=float, default=100, help="berhenti kalau saldo < ini")
     ap.add_argument("--max-age", type=int, default=120, help="cuma beli Frame umur <= sekian detik")
-    ap.add_argument("--buy-delay", type=float, default=1.5, help="beli saat Frame berumur sekian detik setelah launch (default 1.5)")
-    ap.add_argument("--launch-wait-retry", type=float, default=2.0, help="jeda detik antar coba ulang saat server bilang launch_wait")
+    ap.add_argument("--buy-delay", type=float, default=0.5, help="beli saat Frame berumur sekian detik setelah launch (default 0.5)")
+    ap.add_argument("--launch-wait-retry", type=float, default=0.5, help="jeda detik antar coba ulang saat server bilang launch_wait")
     ap.add_argument("--once", action="store_true", help="cek sekali lalu keluar")
     ap.add_argument("--check-only", action="store_true", help="cuma login + cek saldo, tanpa beli")
     a = ap.parse_args()
@@ -912,7 +912,7 @@ def main():
             # ini dicek tiap putaran loop tanpa menghentikan deteksi Frame baru.
             pending[f["id"]] = {"frame": f, "created": created,
                                 "next_try": time.monotonic() + a.launch_wait_retry}
-            log(f"antre retry {f['name']} (launch_wait), coba lagi {a.launch_wait_retry:.0f} dtk lagi")
+            log(f"antre retry {f['name']} (launch_wait), coba lagi {a.launch_wait_retry:g} dtk lagi")
         return False
 
     def retry_pending(now):

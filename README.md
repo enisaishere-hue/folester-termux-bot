@@ -95,8 +95,8 @@ pkill -f bot.py
 
 Opsi lain: `--amount 100` (ANUL per Frame), `--interval 30` (detik antar cek
 polling cadangan), `--no-ws` (matikan websocket), `--max-buys 50`, `--budget 5000`,
-`--reserve 100`, `--max-age 120`, `--buy-delay 1.5` (beli saat Frame berumur
-1,5 detik setelah launch), `--launch-wait-retry 2` (jeda detik antar coba ulang
+`--reserve 100`, `--max-age 120`, `--buy-delay 0.5` (beli saat Frame berumur
+0,5 detik setelah launch), `--launch-wait-retry 0.5` (jeda detik antar coba ulang
 saat server bilang `launch_wait`), `--once` (cek sekali), `--check-only`
 (cuma login + cek saldo).
 
@@ -122,9 +122,9 @@ pakai wallet Solana lamamu.
   dibatalkan, dihapus dari leaderboard, atau wallet diblokir.
 - "Pembeli pertama" tidak bisa dijamin: trade pertama sebuah Frame mendarat
   ~1 detik setelah dibuat (biasanya AI trader situs / kreator), dan bot
-  membeli 1,5 detik setelah Frame dibuat — jadi bot biasanya pembeli
+  membeli 0,5 detik setelah Frame dibuat — jadi bot biasanya pembeli
   ke-2/ke-3, bukan ke-1. Kalau server masih bilang `launch_wait`, bot coba
-  lagi tiap 2 detik sampai umur Frame 120 detik.
+  lagi tiap 0,5 detik sampai umur Frame 120 detik.
 - Script ini cuma BELI. Jual tetap manual dari HP.
 
 ## Lisensi
