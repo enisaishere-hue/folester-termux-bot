@@ -23,10 +23,10 @@
 #       tiap 0,5 detik sampai umur 30 detik, baru berhasil beli.
 #     * Ada jeda 2 detik antar trade (trade_cooldown). Kalau kena, bot
 #       menunggu 2,1 detik sebelum coba lagi.
-#   Setelah beli berhasil, bot OTOMATIS MENJUAL lagi 10 detik kemudian
-#   (--auto-sell-delay) — semua token yang didapat dari beli itu — supaya
-#   modal kembali dan bisa dipakai beli Frame berikutnya. Jual tidak
-#   melihat harga: kalau harga turun dalam 10 detik itu, jualnya rugi.
+#   Auto-sell MATI secara default (--auto-sell-delay 0). Kalau mau dihidupkan
+#   lagi: --auto-sell-delay 10 — bot menjual semua token hasil beli 10 detik
+#   kemudian supaya modal kembali. Jual tidak melihat harga: kalau harga
+#   turun dalam 10 detik itu, jualnya rugi.
 #     2. Polling daftar Frame tiap 30 detik — jalur CADANGAN. Kalau websocket
 #        putus, polling tetap jalan, jadi bot tidak pernah buta. Websocket
 #        yang putus disambung lagi otomatis (backoff 1-30 dtk).
@@ -96,7 +96,7 @@
 #   --max-age 120    = cuma beli Frame yang umurnya <=120 detik saat ketemu
 #   --buy-delay 0.5  = beli saat Frame berumur 0,5 detik setelah launch
 #   --launch-wait-retry 0.5 = jeda detik antar coba ulang saat server bilang launch_wait
-#   --auto-sell-delay 10 = jual otomatis 10 dtk setelah beli (0 = mati)
+#   --auto-sell-delay 0 = jual otomatis mati (isi 10 untuk hidupkan lagi)
 #   --cookies FILE   = file cookie sesi (default ~/.folester_session_cookies.txt).
 #                      WAJIB beda tiap akun kalau jalan 2 bot sekaligus —
 #                      kalau sama, sesinya saling timpa dan bot login melulu.
@@ -898,7 +898,7 @@ def main():
     ap.add_argument("--max-age", type=int, default=120, help="cuma beli Frame umur <= sekian detik")
     ap.add_argument("--buy-delay", type=float, default=0.5, help="beli saat Frame berumur sekian detik setelah launch (default 0.5)")
     ap.add_argument("--launch-wait-retry", type=float, default=0.5, help="jeda detik antar coba ulang saat server bilang launch_wait")
-    ap.add_argument("--auto-sell-delay", type=float, default=10.0, help="jual otomatis sekian detik setelah beli (0 = mati)")
+    ap.add_argument("--auto-sell-delay", type=float, default=0.0, help="jual otomatis sekian detik setelah beli (0 = mati, default 0)")
     ap.add_argument("--cookies", default=None, help="file cookie sesi (default ~/.folester_session_cookies.txt; wajib beda tiap akun kalau jalan 2 bot sekaligus)")
     ap.add_argument("--once", action="store_true", help="cek sekali lalu keluar")
     ap.add_argument("--check-only", action="store_true", help="cuma login + cek saldo, tanpa beli")
