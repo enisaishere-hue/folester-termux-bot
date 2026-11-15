@@ -6,7 +6,7 @@ if [ ! -f config.json ]; then
   echo "Belum ada config.json — jalankan dulu: python3 atur.py"
   exit 1
 fi
-pkill -f bot.py 2>/dev/null
+pkill -f "python3 bot.py$" 2>/dev/null  # cuma bot utama (tanpa flag); bot akun kedua (mulai2) dibiarkan jalan
 sleep 2
 git pull -q 2>/dev/null || true
 nohup python3 bot.py > folester.log 2>&1 &

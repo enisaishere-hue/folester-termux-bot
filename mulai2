@@ -1,0 +1,10 @@
+#!/bin/sh
+# Jalankan bot akun kedua (AKG8) — pengaturan dari config.json, tapi keypair
+# dan file cookie sesi sendiri (supaya tidak bentrok dengan bot utama).
+# Bot utama tetap jalan; mulai2 hanya mematikan bot akun kedua yang lama.
+cd "$(dirname "$0")" || exit 1
+pkill -f "bacj-key.txt" 2>/dev/null
+sleep 2
+git pull -q 2>/dev/null || true
+nohup python3 bot.py --keypair ~/bacj-key.txt --cookies ~/.folester_session_cookies-akg8.txt > folester-akg8.log 2>&1 &
+echo "Bot akun kedua jalan (PID $!). Cek log: log2"

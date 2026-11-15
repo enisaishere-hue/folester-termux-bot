@@ -18,6 +18,26 @@ delay jual, dst.) dan tidak ikut ke Git — aman dari `git pull`. Semua nilai
 di `config.json` bisa ditimpa lewat flag kalau mau, mis.
 `python3 bot.py --amount 50` (berlaku sekali jalan itu saja).
 
+## Dua akun sekaligus
+
+```sh
+./mulai    # bot utama (wallet di config.json), log: log
+./mulai2   # bot akun kedua (AKG8, keypair ~/bacj-key.txt), log: log2
+```
+
+Bot kedua memakai pengaturan yang sama dari `config.json`, tapi keypair dan
+file cookie sesi sendiri (`~/.folester_session_cookies-akg8.txt`) supaya
+sesi kedua akun tidak saling menimpa. `./mulai` hanya mematikan bot utama,
+`./mulai2` hanya mematikan bot akun kedua — keduanya bisa jalan bersamaan.
+Pasang alias log kedua sekali saja:
+
+```sh
+echo "alias log2='tail -f ~/folester-termux-bot/folester-akg8.log'" >> ~/.bashrc && source ~/.bashrc
+```
+
+Berhenti: `pkill -f "python3 bot.py$"` (utama) atau `pkill -f bacj-key.txt`
+(akun kedua).
+
 **File keypair = path file, bukan key-nya langsung.** Kalau pakai wallet
 beda, simpan dulu key-nya ke file baru, lalu isi path itu di `atur.py`:
 
