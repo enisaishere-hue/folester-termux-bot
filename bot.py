@@ -2,6 +2,15 @@
 # ============================================================================
 # Folester Frames TESTNET auto-buy — Termux (jalan di HP Berly, BUKAN di server)
 # ============================================================================
+# CARA PAKAI (tanpa perintah python yang panjang)
+#   1. python3 atur.py — jawab pertanyaan (berapa ANUL tiap beli, beli
+#      berapa detik setelah launch, jual berapa detik setelah beli, dst.).
+#      Tersimpan di config.json. Tekan Enter = pakai nilai lama.
+#   2. ./mulai — bot jalan (otomatis update dari GitHub + matikan bot lama).
+#   3. log — lihat log live.  pkill -f bot.py — berhenti.
+#   Kalau mau tetap pakai perintah langsung, semua pengaturan di config.json
+#   bisa ditimpa lewat flag, mis. python3 bot.py --amount 50 (sekali jalan).
+#
 # CARA KERJA
 #   Script ini jalan di Termux di HP kamu sendiri. Dia memantau daftar Frame
 #   baru di folester.xyz/play, dan kalau ada Frame baru langsung beli pakai
@@ -885,24 +894,70 @@ def sell(frame, amount_tokens, wallet, seed, state):
     return status, r, lock
 
 
+# Pengaturan default. Nilai-nilai ini dipakai kalau tidak ada di config.json
+# dan tidak disebut di perintah. config.json dibuat lewat `python3 atur.py`.
+DEFAULTS = {
+    "keypair": None,
+    "amount": 100.0,
+    "interval": 30.0,
+    "heartbeat": 3.0,
+    "no_ws": False,
+    "max_buys": 50,
+    "budget": 5000.0,
+    "reserve": 100.0,
+    "max_age": 120,
+    "buy_delay": 0.5,
+    "launch_wait_retry": 0.5,
+    "auto_sell_delay": 0.0,
+    "cookies": None,
+    "once": False,
+    "check_only": False,
+}
+
+
+def _load_config():
+    """Baca pengaturan dari config.json di folder yang sama dengan bot.py.
+    Kalau tidak ada atau rusak, kembalikan {} (pakai default). Isi file
+    boleh sebagian saja — yang tidak ada diisi default."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    try:
+        with open(path) as f:
+            cfg = json.load(f)
+            return cfg if isinstance(cfg, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _resolve_args(a, cfg):
+    """Isi argumen yang tidak disebut di perintah dari config.json, lalu
+    dari default. Perintah selalu menang atas config.json."""
+    for k, d in DEFAULTS.items():
+        if getattr(a, k, None) is None:
+            setattr(a, k, cfg.get(k, d))
+    return a
+
+
 def main():
     ap = argparse.ArgumentParser(description="Folester testnet auto-buy (Termux)")
-    ap.add_argument("--keypair", required=True, help="path file keypair Solana, mis. ~/.config/solana/id.json")
-    ap.add_argument("--amount", type=float, default=100, help="ANUL per Frame baru (min 1)")
-    ap.add_argument("--interval", type=float, default=30, help="detik antar cek polling cadangan (deteksi cepat lewat websocket; polling cuma cadangan kalau WS putus)")
-    ap.add_argument("--heartbeat", type=float, default=3, help="detik antar kabar berkala di log (0 = mati)")
-    ap.add_argument("--no-ws", action="store_true", help="matikan websocket, cuma pakai polling")
-    ap.add_argument("--max-buys", type=int, default=50, help="berhenti setelah sekian beli")
-    ap.add_argument("--budget", type=float, default=5000, help="total ANUL maksimal yang dibelanjakan")
-    ap.add_argument("--reserve", type=float, default=100, help="berhenti kalau saldo < ini")
-    ap.add_argument("--max-age", type=int, default=120, help="cuma beli Frame umur <= sekian detik")
-    ap.add_argument("--buy-delay", type=float, default=0.5, help="beli saat Frame berumur sekian detik setelah launch (default 0.5)")
-    ap.add_argument("--launch-wait-retry", type=float, default=0.5, help="jeda detik antar coba ulang saat server bilang launch_wait")
-    ap.add_argument("--auto-sell-delay", type=float, default=0.0, help="jual otomatis sekian detik setelah beli (0 = mati, default 0)")
+    ap.add_argument("--keypair", default=None, help="path file keypair Solana, mis. ~/bacj-key.txt (atau isi di config.json lewat python3 atur.py)")
+    ap.add_argument("--amount", type=float, default=None, help="ANUL per Frame baru (min 1)")
+    ap.add_argument("--interval", type=float, default=None, help="detik antar cek polling cadangan (deteksi cepat lewat websocket; polling cuma cadangan kalau WS putus)")
+    ap.add_argument("--heartbeat", type=float, default=None, help="detik antar kabar berkala di log (0 = mati)")
+    ap.add_argument("--no-ws", action="store_true", default=None, help="matikan websocket, cuma pakai polling")
+    ap.add_argument("--max-buys", type=int, default=None, help="berhenti setelah sekian beli")
+    ap.add_argument("--budget", type=float, default=None, help="total ANUL maksimal yang dibelanjakan")
+    ap.add_argument("--reserve", type=float, default=None, help="berhenti kalau saldo < ini")
+    ap.add_argument("--max-age", type=int, default=None, help="cuma beli Frame umur <= sekian detik")
+    ap.add_argument("--buy-delay", type=float, default=None, help="beli saat Frame berumur sekian detik setelah launch")
+    ap.add_argument("--launch-wait-retry", type=float, default=None, help="jeda detik antar coba ulang saat server bilang launch_wait")
+    ap.add_argument("--auto-sell-delay", type=float, default=None, help="jual otomatis sekian detik setelah beli (0 = mati)")
     ap.add_argument("--cookies", default=None, help="file cookie sesi (default ~/.folester_session_cookies.txt; wajib beda tiap akun kalau jalan 2 bot sekaligus)")
-    ap.add_argument("--once", action="store_true", help="cek sekali lalu keluar")
-    ap.add_argument("--check-only", action="store_true", help="cuma login + cek saldo, tanpa beli")
+    ap.add_argument("--once", action="store_true", default=None, help="cek sekali lalu keluar")
+    ap.add_argument("--check-only", action="store_true", default=None, help="cuma login + cek saldo, tanpa beli")
     a = ap.parse_args()
+    _resolve_args(a, _load_config())
+    if not a.keypair:
+        ap.error("--keypair belum diisi. Jalankan python3 atur.py dulu, atau: python3 bot.py --keypair ~/bacj-key.txt")
     global COOKIE_FILE
     if a.cookies:
         COOKIE_FILE = os.path.expanduser(a.cookies)
@@ -927,6 +982,8 @@ def main():
     sign_in(wallet, seed)
     player = ensure_joined(wallet)
     balance = float(player.get("balance") or 0)
+    log(f"pengaturan: amount={a.amount:g} ANUL, beli {a.buy_delay:g} dtk setelah launch, "
+        f"auto-sell {a.auto_sell_delay:g} dtk, interval {a.interval:g} dtk, max {a.max_buys}x, reserve {a.reserve:g}")
     if a.check_only:
         log("check-only selesai, tidak ada pembelian")
         return 0

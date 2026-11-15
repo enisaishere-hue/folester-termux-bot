@@ -1,0 +1,13 @@
+#!/bin/sh
+# Jalankan bot Folester (pakai pengaturan dari config.json).
+# Kalau belum ada config.json, jalankan dulu: python3 atur.py
+cd "$(dirname "$0")" || exit 1
+if [ ! -f config.json ]; then
+  echo "Belum ada config.json — jalankan dulu: python3 atur.py"
+  exit 1
+fi
+pkill -f bot.py 2>/dev/null
+sleep 2
+git pull -q 2>/dev/null || true
+nohup python3 bot.py > folester.log 2>&1 &
+echo "Bot jalan (PID $!). Cek log: log"

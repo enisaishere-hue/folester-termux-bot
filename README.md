@@ -4,6 +4,20 @@ Bot auto-buy untuk **Folester Frames testnet** (https://www.folester.xyz/play),
 jalan di **Termux di HP Android**. Begitu ada Frame (token) baru, bot langsung
 beli pakai saldo `$ANUL` simulasi — bukan SOL asli, bukan transaksi blockchain.
 
+## Cara pakai (tanpa perintah panjang)
+
+```sh
+python3 atur.py   # jawab pertanyaan (Enter = pakai nilai lama), tersimpan di config.json
+./mulai           # bot jalan (otomatis update + matikan bot lama dulu)
+log               # lihat log live (Ctrl+C buat keluar)
+pkill -f bot.py   # berhenti
+```
+
+`config.json` berisi pengaturanmu (file keypair, ANUL per beli, delay beli,
+delay jual, dst.) dan tidak ikut ke Git — aman dari `git pull`. Semua nilai
+di `config.json` bisa ditimpa lewat flag kalau mau, mis.
+`python3 bot.py --amount 50` (berlaku sekali jalan itu saja).
+
 ## Cara kerja
 
 1. Baca keypair Solana dari HP kamu sendiri (mis. `~/.config/solana/id.json`).
