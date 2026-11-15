@@ -11,13 +11,17 @@ beli pakai saldo `$ANUL` simulasi — bukan SOL asli, bukan transaksi blockchain
    (`folester.xyz wants you to sign in...`), verifikasi, dapat cookie sesi.
 3. Cek syarat kelayakan wallet (umur, hari aktif, transaksi, saldo SOL),
    lalu join kalau belum terdaftar.
-4. Poll daftar Frame tiap 0,5 detik. Kalau ada Frame baru (umur ≤ 120 detik),
-   langsung beli **100 ANUL**. Berhenti setelah 50 kali beli, total 5.000 ANUL,
-   atau saldo di bawah 100 ANUL. Kalau jaringan gagal sesaat (DNS, timeout,
-   server sibuk), tiap request dicoba ulang 5x sebelum bot menyerah. Bot juga
-   menulis kabar berkala tiap 3 detik di log (cek ke-berapa, Frame terbaru,
-   jumlah beli, saldo) supaya kelihatan masih jalan; intervalnya bisa diubah
-   dengan `--heartbeat` (0 = mati).
+4. Deteksi Frame baru lewat **websocket live** (`/api/live`, jalur utama):
+   begitu ada trade pertama di Frame baru, server mengirimnya kurang dari
+   ~1 detik setelah Frame dibuat, dan bot langsung beli **100 ANUL**.
+   Kalau websocket putus, bot menyambung lagi sendiri, dan **polling daftar
+   Frame tiap 0,5 detik** tetap jalan sebagai cadangan. Berhenti setelah
+   50 kali beli, total 5.000 ANUL, atau saldo di bawah 100 ANUL. Kalau
+   jaringan gagal sesaat (DNS, timeout, server sibuk), tiap request dicoba
+   ulang 5x sebelum bot menyerah. Bot juga menulis kabar berkala tiap
+   3 detik di log (cek ke-berapa, Frame terbaru, jumlah beli, saldo, status
+   websocket) supaya kelihatan masih jalan; intervalnya bisa diubah dengan
+   `--heartbeat` (0 = mati). Opsi `--no-ws` mematikan websocket (cuma polling).
 
 ## Instal di Termux
 
@@ -78,9 +82,10 @@ Berhenti:
 pkill -f bot.py
 ```
 
-Opsi lain: `--amount 100` (ANUL per Frame), `--interval 0.5` (detik antar cek),
-`--max-buys 50`, `--budget 5000`, `--reserve 100`, `--max-age 120`,
-`--once` (cek sekali), `--check-only` (cuma login + cek saldo).
+Opsi lain: `--amount 100` (ANUL per Frame), `--interval 0.5` (detik antar cek
+polling), `--no-ws` (matikan websocket), `--max-buys 50`, `--budget 5000`,
+`--reserve 100`, `--max-age 120`, `--once` (cek sekali), `--check-only`
+(cuma login + cek saldo).
 
 ## Keamanan
 
@@ -102,8 +107,10 @@ pakai wallet Solana lamamu.
 
 - Terms Folester §11 melarang bot/script. Kalau ketahuan, alokasi airdrop bisa
   dibatalkan, dihapus dari leaderboard, atau wallet diblokir.
-- "Pembeli pertama" tidak bisa dijamin: situsnya sendiri punya AI trader dan
-  buy pertama sering mendarat ~2 detik setelah Frame dibuat.
+- "Pembeli pertama" tidak bisa dijamin: trade pertama sebuah Frame mendarat
+  ~1 detik setelah dibuat (biasanya AI trader situs / kreator), dan bot
+  websocket membeli sesaat setelah trade pertama itu terlihat — jadi bot
+  biasanya pembeli ke-2/ke-3, bukan ke-1.
 - Script ini cuma BELI. Jual tetap manual dari HP.
 
 ## Lisensi

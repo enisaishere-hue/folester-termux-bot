@@ -8,7 +8,15 @@
 #   saldo $ANUL simulasi (testnet). TIDAK ADA SOL asli yang dipakai, TIDAK ADA
 #   transaksi blockchain. Yang ditandatangani cuma SATU pesan login gratis
 #   ("folester.xyz wants you to sign in...") — bukan transaksi, tanpa gas.
-#   Bot jalan TERUS (poll tiap 5 detik, nonstop) sampai batas aman tercapai:
+#   Deteksi Frame baru ada DUA jalur (keduanya cuma baca, tanpa login):
+#     1. WebSocket live /api/live — jalur UTAMA. Begitu ada trade pertama di
+#        Frame baru, server mengirimnya kurang dari ~1 detik setelah Frame
+#        dibuat (terverifikasi live 2026-11-15: trade pertama SOL mendarat
+#        1,1 detik setelah launching). Bot langsung beli.
+#     2. Polling daftar Frame tiap 0,5 detik — jalur CADANGAN. Kalau websocket
+#        putus, polling tetap jalan, jadi bot tidak pernah buta. Websocket
+#        yang putus disambung lagi otomatis (backoff 1-30 dtk).
+#   Bot jalan TERUS (nonstop) sampai batas aman tercapai:
 #   50 kali beli / total 5.000 ANUL / saldo di bawah 100 ANUL.
 #
 # KUNCI TETAP DI HP KAMU
@@ -28,8 +36,11 @@
 #     airdrop bisa dibatalkan, dihapus dari leaderboard, atau wallet diblokir.
 #     Poin dibagikan manual tiap minggu; 150 jt $ANUL direncanakan untuk
 #     Airdrop 2 tapi konversinya belum diputuskan.
-#   - "Pembeli pertama" tidak bisa dijamin: situsnya sendiri punya AI trader
-#     dan buy pertama sering mendarat ~2 detik setelah Frame dibuat.
+#   - "Pembeli pertama" tidak bisa dijamin: trade pertama sebuah Frame
+#     mendarat ~1 detik setelah dibuat (biasanya AI trader situs / kreator),
+#     dan bot websocket membeli sesaat setelah trade pertama itu terlihat —
+#     jadi bot biasanya pembeli ke-2/ke-3, bukan ke-1. Polling saja lebih
+#     lambat (~2-4 detik).
 #   - Script ini cuma BELI. Jual tetap manual dari HP kamu.
 #   - Wallet yang dipakai HARUS lolos 3 dari 4 syarat Folester: umur >=90 hari,
 #     >=20 hari aktif, >=50 transaksi, saldo >=0,01 SOL. Wallet baru TIDAK
@@ -47,7 +58,8 @@
 #
 # OPSI (boleh diubah):
 #   --amount 100     = beli 100 ANUL tiap Frame baru (minimal 1)
-#   --interval 0.5   = cek daftar Frame tiap 0,5 detik
+#   --interval 0.5   = cek daftar Frame tiap 0,5 detik (jalur polling cadangan)
+#   --no-ws          = matikan websocket, cuma pakai polling (kalau WS bermasalah)
 #   --max-buys 50    = berhenti setelah 50 kali beli
 #   --budget 5000    = berhenti setelah total belanja 5.000 ANUL
 #   --reserve 100    = berhenti kalau saldo ANUL di bawah 100
@@ -62,10 +74,16 @@ import base64
 import hashlib
 import json
 import os
+import queue
+import socket
+import ssl
+import struct
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 BASE = "https://www.folester.xyz"
 UA = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36"
@@ -192,14 +210,20 @@ def base58_decode(s):
 # ---------------------------------------------------------------------------
 # HTTP via curl (urllib kena HTTP 403 dari Folester; curl + UA browser lolos)
 # ---------------------------------------------------------------------------
+# log() dipanggil dari thread utama dan thread websocket, jadi tulis log
+# dikunci supaya barisnya tidak tercampur.
+_LOG_LOCK = threading.Lock()
+
+
 def log(msg):
     line = f"{datetime.now(timezone.utc).isoformat()} {msg}"
-    print(line, flush=True)
-    try:
-        with open(LOG_FILE, "a") as f:
-            f.write(line + "\n")
-    except OSError:
-        pass
+    with _LOG_LOCK:
+        print(line, flush=True)
+        try:
+            with open(LOG_FILE, "a") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass
 
 
 # Berapa kali curl dicoba ulang kalau jaringannya gagal sesaat (DNS, putus,
@@ -256,6 +280,232 @@ def curl_json(url, method="GET", data=None, use_cookies=False):
             log(f"jaringan gagal ({last_err}), coba lagi {attempt + 1}/{RETRY_ATTEMPTS} setelah {wait} dtk")
             time.sleep(wait)
     raise last_err
+
+
+# ---------------------------------------------------------------------------
+# WebSocket live feed /api/live (pure stdlib, tanpa library tambahan)
+# Jalur UTAMA deteksi Frame baru. Server mengirim tiap trade dan tiap update
+# harga sebagai JSON; trade pertama sebuah Frame baru mendarat ~1 detik
+# setelah Frame dibuat (terverifikasi live 2026-11-15, 240 dtk, 260 pesan,
+# 0 putus). Pesan yang dipakai cuma tradeUpdate / priceUpdate — keduanya
+# membawa objek frame lengkap (id, name, price, trades, created_at).
+# Koneksi ini cuma BACA (tanpa login, tanpa sign). Kalau putus, thread ini
+# menyambung lagi sendiri (backoff 1-30 dtk); sementara itu polling tetap
+# jalan, jadi tidak ada jeda deteksi.
+# ---------------------------------------------------------------------------
+WS_HOST = "www.folester.xyz"
+WS_PORT = 443
+WS_PATH = "/api/live"
+_WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
+def _ws_raw_connect(host, port):
+    """Koneksi TCP. Coba langsung dulu; kalau gagal dan ada proxy di env
+    (VM Muse), lewat CONNECT proxy itu. Di Termux tidak ada proxy env,
+    jadi selalu langsung. Kredensial proxy dibaca dari env saat jalan,
+    tidak pernah dicetak atau disimpan."""
+    try:
+        return socket.create_connection((host, port), timeout=15)
+    except (OSError, socket.timeout) as first_err:
+        proxy = os.environ.get("https_proxy") or os.environ.get("HTTPS_PROXY")
+        if not proxy:
+            raise first_err
+        u = urlparse(proxy)
+        if not u.hostname or u.hostname in ("localhost", "127.0.0.1"):
+            raise first_err
+        s = socket.create_connection((u.hostname, u.port or 3128), timeout=15)
+        req = f"CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n"
+        if u.username:
+            auth = base64.b64encode(f"{u.username}:{u.password}".encode()).decode()
+            req += f"Proxy-Authorization: Basic {auth}\r\n"
+        req += "\r\n"
+        s.sendall(req.encode())
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            chunk = s.recv(4096)
+            if not chunk:
+                s.close()
+                raise RuntimeError("proxy menutup koneksi saat CONNECT")
+            buf += chunk
+        if b" 200 " not in buf.split(b"\r\n")[0]:
+            s.close()
+            raise RuntimeError("proxy CONNECT gagal")
+        return s
+
+
+def _ws_connect(host, port, path):
+    raw = _ws_raw_connect(host, port)
+    use_tls = (port == 443)
+    ss = raw
+    if use_tls:
+        ctx = ssl.create_default_context()
+        ss = ctx.wrap_socket(raw, server_hostname=host)
+    key = base64.b64encode(os.urandom(16)).decode()
+    host_hdr = host if port == 443 else f"{host}:{port}"
+    origin = f"https://{host}" if use_tls else f"http://{host}"
+    req = (f"GET {path} HTTP/1.1\r\nHost: {host_hdr}\r\n"
+           "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+           f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
+           f"Origin: {origin}\r\nUser-Agent: {UA}\r\n\r\n")
+    ss.sendall(req.encode())
+    ss.settimeout(15)
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        chunk = ss.recv(4096)
+        if not chunk:
+            raise RuntimeError("websocket menutup koneksi saat handshake")
+        buf += chunk
+    head = buf.split(b"\r\n\r\n", 1)[0]
+    if b"101" not in head.split(b"\r\n")[0]:
+        raise RuntimeError(f"websocket handshake gagal: {head[:120]!r}")
+    return ss, buf.split(b"\r\n\r\n", 1)[1]
+
+
+def _ws_send(ss, opcode, payload=b""):
+    mask = os.urandom(4)
+    ln = len(payload)
+    hdr = bytearray([0x80 | opcode])
+    if ln < 126:
+        hdr.append(0x80 | ln)
+    elif ln < 65536:
+        hdr.append(0x80 | 126)
+        hdr += struct.pack(">H", ln)
+    else:
+        hdr.append(0x80 | 127)
+        hdr += struct.pack(">Q", ln)
+    hdr += mask
+    ss.sendall(bytes(hdr) + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+
+
+def _ws_read_frame(ss, buf):
+    """Baca satu frame websocket. Kembalikan (fin, opcode, payload, sisa buf)."""
+    while len(buf) < 2:
+        chunk = ss.recv(4096)
+        if not chunk:
+            raise RuntimeError("websocket ditutup server")
+        buf += chunk
+    b1, b2 = buf[0], buf[1]
+    fin = b1 & 0x80
+    opcode = b1 & 0x0F
+    masked = b2 & 0x80
+    ln = b2 & 0x7F
+    i = 2
+    if ln == 126:
+        while len(buf) < i + 2:
+            buf += ss.recv(4096)
+        ln = struct.unpack(">H", buf[i:i + 2])[0]
+        i += 2
+    elif ln == 127:
+        while len(buf) < i + 8:
+            buf += ss.recv(4096)
+        ln = struct.unpack(">Q", buf[i:i + 8])[0]
+        i += 8
+    if masked:
+        while len(buf) < i + 4:
+            buf += ss.recv(4096)
+        mask = buf[i:i + 4]
+        i += 4
+    else:
+        mask = None
+    while len(buf) < i + ln:
+        chunk = ss.recv(65536)
+        if not chunk:
+            raise RuntimeError("websocket ditutup server")
+        buf += chunk
+    payload = bytearray(buf[i:i + ln])
+    if mask:
+        for j in range(len(payload)):
+            payload[j] ^= mask[j % 4]
+    return fin, opcode, bytes(payload), buf[i + ln:]
+
+
+def _ws_recv_text(ss, buf):
+    """Baca satu pesan teks lengkap (gabungkan fragment, jawab ping).
+    Kembalikan (bytes_pesan, sisa buf). Raise kalau koneksi ditutup."""
+    fragments = bytearray()
+    while True:
+        fin, op, payload, buf = _ws_read_frame(ss, buf)
+        if op == 9:  # ping -> pong
+            _ws_send(ss, 10, payload)
+            continue
+        if op == 8:  # close
+            raise RuntimeError("websocket ditutup server (close frame)")
+        if op == 1 or op == 0:  # teks / lanjutan
+            fragments += payload
+            if fin:
+                return bytes(fragments), buf
+            continue
+        # frame lain (biner dsb.): abaikan
+        continue
+
+
+def _ws_normalize_frame(fr):
+    """Ubah objek frame dari pesan WS ke bentuk yang dipakai process_frame.
+    Kembalikan None kalau field pentingnya tidak ada / tidak valid."""
+    try:
+        return {"id": str(fr["id"]), "name": str(fr.get("name", "?")),
+                "price": float(fr.get("price", 0) or 0),
+                "trades": int(fr.get("trades", 0) or 0),
+                "created_at": str(fr.get("created_at", ""))}
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def ws_frames_from_message(msg):
+    """Ambil objek frame kandidat dari satu pesan WS (tradeUpdate /
+    priceUpdate / frame langsung). Pesan lain (tanpa frame) -> []."""
+    out = []
+    if not isinstance(msg, dict):
+        return out
+    for key in ("priceUpdate", "tradeUpdate"):
+        u = msg.get(key)
+        if isinstance(u, dict) and isinstance(u.get("frame"), dict):
+            fr = _ws_normalize_frame(u["frame"])
+            if fr:
+                out.append(fr)
+    if isinstance(msg.get("frame"), dict):
+        fr = _ws_normalize_frame(msg["frame"])
+        if fr:
+            out.append(fr)
+    return out
+
+
+def ws_listen(frame_queue, status, stop_event):
+    """Thread pendengar websocket: sambung, baca pesan, lempar frame ke queue.
+    Putus -> sambung lagi (backoff 1-30 dtk). Tidak pernah mematikan bot."""
+    backoff = 1.0
+    while not stop_event.is_set():
+        ss = None
+        try:
+            ss, buf = _ws_connect(WS_HOST, WS_PORT, WS_PATH)
+            status["connected"] = True
+            status["last_msg"] = time.monotonic()
+            log("websocket live tersambung (deteksi Frame baru <1 dtk)")
+            backoff = 1.0
+            ss.settimeout(5)
+            while not stop_event.is_set():
+                text, buf = _ws_recv_text(ss, buf)
+                status["last_msg"] = time.monotonic()
+                try:
+                    msg = json.loads(text)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                for fr in ws_frames_from_message(msg):
+                    frame_queue.put(fr)
+        except Exception as e:
+            status["connected"] = False
+            status["reconnects"] = status.get("reconnects", 0) + 1
+            log(f"websocket putus ({e}), sambung lagi {backoff:.0f} dtk (polling tetap jalan)")
+            if ss is not None:
+                try:
+                    ss.close()
+                except Exception:
+                    pass
+            if stop_event.wait(backoff):
+                break
+            backoff = min(backoff * 2, 30)
+        finally:
+            status["connected"] = False
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +660,7 @@ def main():
     ap.add_argument("--amount", type=float, default=100, help="ANUL per Frame baru (min 1)")
     ap.add_argument("--interval", type=float, default=0.5, help="detik antar cek")
     ap.add_argument("--heartbeat", type=float, default=3, help="detik antar kabar berkala di log (0 = mati)")
+    ap.add_argument("--no-ws", action="store_true", help="matikan websocket, cuma pakai polling")
     ap.add_argument("--max-buys", type=int, default=50, help="berhenti setelah sekian beli")
     ap.add_argument("--budget", type=float, default=5000, help="total ANUL maksimal yang dibelanjakan")
     ap.add_argument("--reserve", type=float, default=100, help="berhenti kalau saldo < ini")
@@ -449,6 +700,52 @@ def main():
     polls = 0
     last_beat = time.monotonic()
     latest_ts, latest_name = "", "-"
+    ws_queue = queue.Queue()
+    ws_status = {"connected": False, "last_msg": 0.0, "reconnects": 0}
+    ws_stop = threading.Event()
+    ws_thread = None
+    if not a.no_ws and not a.once and not a.check_only:
+        ws_thread = threading.Thread(target=ws_listen,
+                                     args=(ws_queue, ws_status, ws_stop),
+                                     daemon=True)
+        ws_thread.start()
+
+    def process_frame(f, now, is_live=False):
+        """Satu Frame kandidat -> beli kalau lolos semua syarat.
+        Dipakai jalur websocket (live) dan polling (cadangan) dengan aturan
+        yang sama persis. Kembalikan True kalau bot harus STOP."""
+        nonlocal buys, spent, balance, latest_ts, latest_name
+        ts = f.get("created_at") or ""
+        if ts > latest_ts:
+            latest_ts = ts
+            latest_name = f.get("name", "?")
+        if f["id"] in seen:
+            return False
+        seen.add(f["id"])
+        if first and not is_live:
+            return False  # poll pertama cuma seeding, jangan beli riwayat lama
+        try:
+            created = datetime.fromisoformat(f["created_at"].replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        age = (now - created).total_seconds()
+        if age < 0 or age > a.max_age:
+            return False
+        # balance adalah saldo LIVE (diperbarui dari server tiap selesai beli),
+        # jadi cadangan dicek dari saldo setelah beli ini, bukan saldo dikurangi
+        # spent (itu menghitung dobel dan membuat bot berhenti terlalu cepat).
+        if buys >= a.max_buys or spent + a.amount > a.budget or balance - a.amount < a.reserve:
+            log(f"STOP: buys={buys} spent={spent:.2f} saldo~{balance:.2f}")
+            return True
+        src = "WS" if is_live else "poll"
+        log(f"FRAME BARU {f['name']} umur={age:.0f} dtk harga={f['price']:.6f} ANUL trades={f.get('trades', 0)} [{src}]")
+        r = buy(f, a.amount, wallet, seed, state)
+        if r:
+            buys += 1
+            spent += a.amount
+            balance = float(get_me(wallet).get("player", {}).get("balance") or balance - a.amount)
+        return False
+
     while True:
         if a.heartbeat > 0 and time.monotonic() - last_beat >= a.heartbeat:
             try:
@@ -456,51 +753,41 @@ def main():
                 age_s = f"{age:.0f} dtk lalu"
             except (ValueError, TypeError):
                 age_s = "?"
-            log(f"memantau... cek ke-{polls} | Frame terbaru: {latest_name} ({age_s}) | beli: {buys} | saldo: ~{balance:.2f} ANUL")
+            ws_bit = ""
+            if ws_thread is not None:
+                ws_bit = " | ws: OK" if ws_status["connected"] else " | ws: PUTUS"
+            log(f"memantau... cek ke-{polls} | Frame terbaru: {latest_name} ({age_s}) | beli: {buys} | saldo: ~{balance:.2f} ANUL{ws_bit}")
             last_beat = time.monotonic()
+        # 1. Jalur websocket: Frame yang masuk live diproses dulu (paling cepat).
+        now = datetime.now(timezone.utc)
+        while True:
+            try:
+                f = ws_queue.get_nowait()
+            except queue.Empty:
+                break
+            if process_frame(f, now, is_live=True):
+                ws_stop.set()
+                return 0
+        # 2. Jalur polling cadangan: daftar lengkap, kalau WS ketinggalan.
         try:
             frames = fetch_frames()
         except Exception as e:
             log(f"poll gagal: {e}")
             if a.once:
+                ws_stop.set()
                 return 1
             time.sleep(a.interval)
             continue
         polls += 1
-        for f in frames:
-            ts = f.get("created_at") or ""
-            if ts > latest_ts:
-                latest_ts = ts
-                latest_name = f.get("name", "?")
         now = datetime.now(timezone.utc)
         for f in frames:
-            if f["id"] in seen:
-                continue
-            seen.add(f["id"])
-            if first:
-                continue  # poll pertama cuma seeding, jangan beli riwayat lama
-            try:
-                created = datetime.fromisoformat(f["created_at"].replace("Z", "+00:00"))
-            except ValueError:
-                continue
-            age = (now - created).total_seconds()
-            if age < 0 or age > a.max_age:
-                continue
-            # balance adalah saldo LIVE (diperbarui dari server tiap selesai beli),
-            # jadi cadangan dicek dari saldo setelah beli ini, bukan saldo dikurangi
-            # spent (itu menghitung dobel dan membuat bot berhenti terlalu cepat).
-            if buys >= a.max_buys or spent + a.amount > a.budget or balance - a.amount < a.reserve:
-                log(f"STOP: buys={buys} spent={spent:.2f} saldo~{balance:.2f}")
+            if process_frame(f, now):
+                ws_stop.set()
                 return 0
-            log(f"FRAME BARU {f['name']} umur={age:.0f} dtk harga={f['price']:.6f} ANUL trades={f['trades']}")
-            r = buy(f, a.amount, wallet, seed, state)
-            if r:
-                buys += 1
-                spent += a.amount
-                balance = float(get_me(wallet).get("player", {}).get("balance") or balance - a.amount)
         first = False
         if a.once:
             log(f"once selesai: buys={buys} spent={spent:.2f}")
+            ws_stop.set()
             return 0
         time.sleep(a.interval)
 
