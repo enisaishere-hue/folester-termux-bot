@@ -11,7 +11,7 @@ beli pakai saldo `$ANUL` simulasi — bukan SOL asli, bukan transaksi blockchain
    (`folester.xyz wants you to sign in...`), verifikasi, dapat cookie sesi.
 3. Cek syarat kelayakan wallet (umur, hari aktif, transaksi, saldo SOL),
    lalu join kalau belum terdaftar.
-4. Poll daftar Frame tiap 5 detik. Kalau ada Frame baru (umur ≤ 120 detik),
+4. Poll daftar Frame tiap 0,5 detik. Kalau ada Frame baru (umur ≤ 120 detik),
    langsung beli **100 ANUL**. Berhenti setelah 50 kali beli, total 5.000 ANUL,
    atau saldo di bawah 100 ANUL.
 
@@ -19,7 +19,7 @@ beli pakai saldo `$ANUL` simulasi — bukan SOL asli, bukan transaksi blockchain
 
 ```sh
 pkg install python curl
-curl -sL https://raw.githubusercontent.com/enisaishere-hue/folester-termux-bot/main/folester_termux.py -o folester_termux.py
+curl -sL https://raw.githubusercontent.com/enisaishere-hue/folester-termux-bot/main/bot.py -o bot.py
 ```
 
 Atau pakai git:
@@ -52,29 +52,29 @@ Cek dulu tanpa beli — pastikan alamat yang tampil adalah wallet kamu
 (`BacJgMh1bS4yPYKA6oLMZUWrwgeDE6aJQdAZhKiu399C`):
 
 ```sh
-python3 folester_termux.py --keypair ~/bacj-key.txt --check-only
+python3 bot.py --keypair ~/bacj-key.txt --check-only
 ```
 
 Kalau keypair kamu sudah ada sebagai file JSON, pakai path itu:
 
 ```sh
-python3 folester_termux.py --keypair ~/.config/solana/id.json --check-only
+python3 bot.py --keypair ~/.config/solana/id.json --check-only
 ```
 
 Jalankan:
 
 ```sh
 termux-wake-lock
-nohup python3 folester_termux.py --keypair ~/.config/solana/id.json --amount 100 > folester.log 2>&1 &
+nohup python3 bot.py --keypair ~/.config/solana/id.json --amount 100 > folester.log 2>&1 &
 ```
 
 Berhenti:
 
 ```sh
-pkill -f folester_termux.py
+pkill -f bot.py
 ```
 
-Opsi lain: `--amount 100` (ANUL per Frame), `--interval 5` (detik antar cek),
+Opsi lain: `--amount 100` (ANUL per Frame), `--interval 0.5` (detik antar cek),
 `--max-buys 50`, `--budget 5000`, `--reserve 100`, `--max-age 120`,
 `--once` (cek sekali), `--check-only` (cuma login + cek saldo).
 
