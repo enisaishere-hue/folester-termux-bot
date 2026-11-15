@@ -958,6 +958,11 @@ def main():
     _resolve_args(a, _load_config())
     if not a.keypair:
         ap.error("--keypair belum diisi. Jalankan python3 atur.py dulu, atau: python3 bot.py --keypair ~/bacj-key.txt")
+    if "/" not in a.keypair and len(a.keypair) > 40:
+        print("BERHENTI: --keypair harus path file, bukan private key langsung.", file=sys.stderr)
+        print("Simpan dulu key-nya ke file, mis. cat > ~/bacj-key.txt (tempel key, Enter, Ctrl+D),", file=sys.stderr)
+        print("lalu jalankan bot dengan path file itu.", file=sys.stderr)
+        return 2
     global COOKIE_FILE
     if a.cookies:
         COOKIE_FILE = os.path.expanduser(a.cookies)

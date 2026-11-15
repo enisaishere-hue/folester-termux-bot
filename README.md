@@ -18,6 +18,17 @@ delay jual, dst.) dan tidak ikut ke Git — aman dari `git pull`. Semua nilai
 di `config.json` bisa ditimpa lewat flag kalau mau, mis.
 `python3 bot.py --amount 50` (berlaku sekali jalan itu saja).
 
+**File keypair = path file, bukan key-nya langsung.** Kalau pakai wallet
+beda, simpan dulu key-nya ke file baru, lalu isi path itu di `atur.py`:
+
+```sh
+cat > ~/wallet-baru-key.txt   # tempel key-nya, Enter, Ctrl+D
+python3 atur.py               # isi path: ~/wallet-baru-key.txt
+```
+
+Jangan pernah tempel private key ke `atur.py` atau ke chat — bot dan
+`atur.py` akan menolaknya dan menyuruh simpan ke file dulu.
+
 ## Cara kerja
 
 1. Baca keypair Solana dari HP kamu sendiri (mis. `~/.config/solana/id.json`).

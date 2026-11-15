@@ -30,6 +30,27 @@ def _load():
         return {}
 
 
+def _tanya_keypair(cfg):
+    """Tanya path file keypair. Tolak private key langsung dan path yang
+    tidak ada — bot hanya mau baca file, bukan key yang ditempel."""
+    lama = cfg.get("keypair", DEFAULTS["keypair"])
+    while True:
+        raw = input(f"File keypair (path file key di HP kamu) [{lama}]: ").strip()
+        p = raw or lama
+        # Private key langsung (base58 panjang tanpa /) — bukan path file.
+        if "/" not in p and len(p) > 40:
+            print("  Itu kelihatannya private key langsung, bukan path file.")
+            print("  Bot tidak mau key yang ditempel. Simpan dulu ke file:")
+            print("    cat > ~/wallet-key.txt   (lalu tempel key-nya, Enter, Ctrl+D)")
+            print("  Lalu isi path filenya di sini, mis. ~/wallet-key.txt")
+            continue
+        if not os.path.isfile(os.path.expanduser(p)):
+            print(f"  File tidak ditemukan: {p}")
+            print("  Cek lagi path-nya, atau simpan dulu key-nya ke file.")
+            continue
+        return p
+
+
 def _tanya(label, kunci, cfg, tipe=float):
     lama = cfg.get(kunci, DEFAULTS[kunci])
     while True:
@@ -47,9 +68,7 @@ def main():
     print("== Atur bot Folester ==")
     print("Tekan Enter untuk pakai nilai yang tertulis di [tanda kurung].")
     print()
-    lama_key = cfg.get("keypair", DEFAULTS["keypair"])
-    key = input(f"File keypair (path file key di HP kamu) [{lama_key}]: ").strip()
-    cfg["keypair"] = key or lama_key
+    cfg["keypair"] = _tanya_keypair(cfg)
     cfg["amount"] = _tanya("Berapa ANUL tiap beli", "amount", cfg)
     cfg["buy_delay"] = _tanya("Beli berapa detik setelah launch", "buy_delay", cfg)
     cfg["auto_sell_delay"] = _tanya("Jual otomatis berapa detik setelah beli (0 = mati)", "auto_sell_delay", cfg)
