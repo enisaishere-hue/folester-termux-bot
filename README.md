@@ -30,9 +30,32 @@ git clone https://github.com/enisaishere-hue/folester-termux-bot.git
 cd folester-termux-bot
 ```
 
+## Siapkan keypair dulu (sekali saja)
+
+Script butuh keypair wallet BacJ di HP kamu. Kalau belum ada file
+`~/.config/solana/id.json` di Termux, export dari Phantom:
+
+1. Buka Phantom, pilih wallet BacJ.
+2. Settings → Export Private Key, masukkan password, salin kuncinya.
+3. Di Termux, simpan ke file (tempel, Enter, lalu Ctrl+D):
+
+```sh
+cat > ~/bacj-key.txt
+chmod 600 ~/bacj-key.txt
+```
+
+File itu cuma ada di HP kamu — jangan kirim ke siapa pun.
+
 ## Pakai
 
-Cek dulu tanpa beli — pastikan alamat yang tampil adalah wallet kamu:
+Cek dulu tanpa beli — pastikan alamat yang tampil adalah wallet kamu
+(`BacJgMh1bS4yPYKA6oLMZUWrwgeDE6aJQdAZhKiu399C`):
+
+```sh
+python3 folester_termux.py --keypair ~/bacj-key.txt --check-only
+```
+
+Kalau keypair kamu sudah ada sebagai file JSON, pakai path itu:
 
 ```sh
 python3 folester_termux.py --keypair ~/.config/solana/id.json --check-only

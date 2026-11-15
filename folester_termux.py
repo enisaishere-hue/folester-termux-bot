@@ -12,8 +12,13 @@
 #   50 kali beli / total 5.000 ANUL / saldo di bawah 100 ANUL.
 #
 # KUNCI TETAP DI HP KAMU
-#   Script ini membaca file keypair Solana dari HP kamu sendiri
-#   (mis. ~/.config/solana/id.json) dan TIDAK PERNAH mengirimnya ke mana pun.
+#   Script ini membaca file keypair Solana dari HP kamu sendiri dan TIDAK
+#   PERNAH mengirimnya ke mana pun. Dua format diterima:
+#     1. File keypair Solana (JSON, mis. ~/.config/solana/id.json)
+#     2. File berisi SATU BARIS private key base58 — hasil export dari Phantom
+#        (buka Phantom, pilih wallet BacJ, Settings > Export Private Key).
+#        Simpan ke file dengan:  cat > ~/bacj-key.txt  (lalu tempel, Enter, Ctrl+D)
+#        lalu jalankan script dengan --keypair ~/bacj-key.txt
 #   Jangan pernah kirim file keypair / seed phrase itu ke saya, ke chat,
 #   ke Drive, atau ke siapa pun. Script ini juga tidak pernah mencetak
 #   isi keypair ke log — yang tampil cuma alamat wallet (publik).
@@ -172,6 +177,15 @@ def base58_encode(b):
     return "1" * pad + s
 
 
+def base58_decode(s):
+    n = 0
+    for c in s:
+        n = n * 58 + _B58.index(c)
+    b = n.to_bytes((n.bit_length() + 7) // 8, "big") if n > 0 else b""
+    pad = len(s) - len(s.lstrip("1"))
+    return b"\x00" * pad + b
+
+
 # ---------------------------------------------------------------------------
 # HTTP via curl (urllib kena HTTP 403 dari Folester; curl + UA browser lolos)
 # ---------------------------------------------------------------------------
@@ -219,8 +233,21 @@ def curl_json(url, method="GET", data=None, use_cookies=False):
 # Wallet + login
 # ---------------------------------------------------------------------------
 def load_keypair(path):
+    """Baca keypair dari file. Dua format diterima:
+    1. File keypair Solana (JSON, mis. ~/.config/solana/id.json) — daftar 64 angka.
+    2. File berisi SATU BARIS private key base58 (hasil export dari Phantom).
+    File ini dibaca di HP kamu sendiri dan tidak pernah dikirim ke mana pun."""
     with open(path) as f:
-        raw = json.load(f)
+        text = f.read().strip()
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError:
+        raw = None
+    if raw is None:
+        secret = base58_decode(text)
+        if len(secret) not in (32, 64):
+            raise ValueError("isi file bukan keypair JSON dan bukan private key base58 yang valid")
+        raw = list(secret)
     if isinstance(raw, dict):
         raw = raw.get("keypair") or raw.get("secretKey") or raw.get("secret_key")
     secret = bytes(raw)
@@ -369,7 +396,14 @@ def main():
     except OSError:
         pass
 
-    seed, pubkey, wallet = load_keypair(os.path.expanduser(a.keypair))
+    try:
+        seed, pubkey, wallet = load_keypair(os.path.expanduser(a.keypair))
+    except FileNotFoundError:
+        print(f"BERHENTI: file keypair tidak ditemukan: {os.path.expanduser(a.keypair)}", file=sys.stderr)
+        print("File itu belum ada di Termux. Export private key dari Phantom (wallet BacJ),", file=sys.stderr)
+        print("simpan ke satu file di Termux, lalu ulangi dengan --keypair <file itu>.", file=sys.stderr)
+        print("Jangan kirim key-nya ke siapa pun, termasuk ke saya.", file=sys.stderr)
+        return 2
     log(f"wallet={wallet} (alamat saja yang dicatat, keypair tidak pernah dicatat)")
     sign_in(wallet, seed)
     player = ensure_joined(wallet)
