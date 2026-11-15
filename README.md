@@ -15,25 +15,36 @@ beli pakai saldo `$ANUL` simulasi — bukan SOL asli, bukan transaksi blockchain
    begitu ada trade pertama di Frame baru, server mengirimnya kurang dari
    ~1 detik setelah Frame dibuat, dan bot langsung beli **100 ANUL**.
    Kalau websocket putus, bot menyambung lagi sendiri, dan **polling daftar
-   Frame tiap 0,5 detik** tetap jalan sebagai cadangan. Berhenti setelah
+   Frame tiap 30 detik** tetap jalan sebagai cadangan. Berhenti setelah
    50 kali beli, total 5.000 ANUL, atau saldo di bawah 100 ANUL. Kalau
    jaringan gagal sesaat (DNS, timeout, server sibuk), tiap request dicoba
-   ulang 5x sebelum bot menyerah. Bot juga menulis kabar berkala tiap
+   ulang 5x sebelum bot menyerah. Semua request HTTP memakai Python murni
+   (tanpa library tambahan); curl dipakai sebagai cadangan kalau jalur
+   Python gagal. Bot juga menulis kabar berkala tiap
    3 detik di log (cek ke-berapa, Frame terbaru, jumlah beli, saldo, status
    websocket) supaya kelihatan masih jalan; intervalnya bisa diubah dengan
    `--heartbeat` (0 = mati). Opsi `--no-ws` mematikan websocket (cuma polling).
 
+## Paket data
+
+Daftar Frame ~1 MB per unduhan (dikompres jadi ~0,35 MB). Karena deteksi
+cepat sudah lewat websocket (pesannya kecil), polling cuma cadangan tiap
+30 detik — total pemakaian kira-kira **50 MB/jam**. Dulu polling tiap
+0,5 detik bisa makan 2-4 GB/jam. Kalau mau lebih hemat, naikkan
+`--interval` (mis. 60); kalau mau lebih cepat saat websocket putus,
+turunkan.
+
 ## Instal di Termux
 
 ```sh
-pkg install python curl
+pkg install python
 curl -sL https://raw.githubusercontent.com/enisaishere-hue/folester-termux-bot/main/bot.py -o bot.py
 ```
 
 Atau pakai git:
 
 ```sh
-pkg install python curl git
+pkg install python git
 git clone https://github.com/enisaishere-hue/folester-termux-bot.git
 cd folester-termux-bot
 ```
@@ -82,8 +93,8 @@ Berhenti:
 pkill -f bot.py
 ```
 
-Opsi lain: `--amount 100` (ANUL per Frame), `--interval 0.5` (detik antar cek
-polling), `--no-ws` (matikan websocket), `--max-buys 50`, `--budget 5000`,
+Opsi lain: `--amount 100` (ANUL per Frame), `--interval 30` (detik antar cek
+polling cadangan), `--no-ws` (matikan websocket), `--max-buys 50`, `--budget 5000`,
 `--reserve 100`, `--max-age 120`, `--once` (cek sekali), `--check-only`
 (cuma login + cek saldo).
 

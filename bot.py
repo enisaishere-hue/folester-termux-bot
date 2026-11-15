@@ -13,7 +13,7 @@
 #        Frame baru, server mengirimnya kurang dari ~1 detik setelah Frame
 #        dibuat (terverifikasi live 2026-11-15: trade pertama SOL mendarat
 #        1,1 detik setelah launching). Bot langsung beli.
-#     2. Polling daftar Frame tiap 0,5 detik — jalur CADANGAN. Kalau websocket
+#     2. Polling daftar Frame tiap 30 detik — jalur CADANGAN. Kalau websocket
 #        putus, polling tetap jalan, jadi bot tidak pernah buta. Websocket
 #        yang putus disambung lagi otomatis (backoff 1-30 dtk).
 #   Bot jalan TERUS (nonstop) sampai batas aman tercapai:
@@ -47,7 +47,8 @@
 #     lolos — pakai wallet Solana lamamu.
 #
 # KEBUTUHAN DI TERMUX (sekali saja):
-#   pkg install python curl
+#   pkg install python
+#   (curl opsional — dipakai sebagai cadangan kalau HTTP Python gagal)
 #
 # CARA JALANIN (ketik di Termux, satu baris tiap perintah):
 #   1. Cek dulu (tanpa beli):  python3 bot.py --keypair ~/.config/solana/id.json --check-only
@@ -58,7 +59,7 @@
 #
 # OPSI (boleh diubah):
 #   --amount 100     = beli 100 ANUL tiap Frame baru (minimal 1)
-#   --interval 0.5   = cek daftar Frame tiap 0,5 detik (jalur polling cadangan)
+#   --interval 30    = cek daftar Frame tiap 30 detik (jalur polling cadangan)
 #   --no-ws          = matikan websocket, cuma pakai polling (kalau WS bermasalah)
 #   --max-buys 50    = berhenti setelah 50 kali beli
 #   --budget 5000    = berhenti setelah total belanja 5.000 ANUL
@@ -68,10 +69,17 @@
 #   retry otomatis    = kalau jaringan gagal sesaat (DNS/timeout/server sibuk),
 #                       tiap request dicoba ulang 5x sebelum bot menyerah
 #   --heartbeat 3    = kabar berkala tiap 3 detik di log (bukti bot masih jalan)
+# PAKET DATA: daftar Frame ~1 MB per unduhan (dikompres jadi ~0,35 MB).
+# Dulu polling tiap 0,5 dtk bisa makan 2-4 GB/jam. Sekarang deteksi cepat
+# sudah lewat websocket (pesannya kecil, ~1,5 dtk), polling cuma cadangan
+# tiap 30 dtk — total pemakaian kira-kira 50 MB/jam. Kalau mau lebih hemat,
+# naikkan --interval (mis. 60); kalau mau lebih cepat saat WS putus, turunkan.
 # ============================================================================
 import argparse
 import base64
+import gzip
 import hashlib
+import http.client
 import json
 import os
 import queue
@@ -208,7 +216,14 @@ def base58_decode(s):
 
 
 # ---------------------------------------------------------------------------
-# HTTP via curl (urllib kena HTTP 403 dari Folester; curl + UA browser lolos)
+# HTTP (JSON) — Python murni dulu, curl sebagai cadangan
+# Dulu urllib kena HTTP 403 dari Folester, jadi semua request lewat curl.
+# Sekarang HTTP bawaan Python (http.client + UA browser) bisa membaca API
+# Folester dengan lengkap (terverifikasi live 2026-11-15: daftar 1.289 Frame
+# ~1 MB + nonce + /me). urllib.request masih bermasalah (balasan besar
+# terpotong di tengah jalan), jadi yang dipakai http.client langsung.
+# Kalau jalur Python gagal (apa pun alasannya), otomatis dicoba lewat curl
+# (kalau curl terpasang). Jadi di Termux cukup `pkg install python`.
 # ---------------------------------------------------------------------------
 # log() dipanggil dari thread utama dan thread websocket, jadi tulis log
 # dikunci supaya barisnya tidak tercampur.
@@ -226,7 +241,7 @@ def log(msg):
             pass
 
 
-# Berapa kali curl dicoba ulang kalau jaringannya gagal sesaat (DNS, putus,
+# Berapa kali request dicoba ulang kalau jaringannya gagal sesaat (DNS, putus,
 # timeout, server 5xx). Bukan untuk error 4xx (login salah, tidak lolos
 # syarat, dsb.) — itu langsung gagal supaya tidak buang waktu.
 RETRY_ATTEMPTS = 5
@@ -234,8 +249,122 @@ RETRYABLE_CURL_RC = {6, 7, 28, 35, 47, 52, 56}
 RETRYABLE_HTTP = {429, 500, 502, 503, 504}
 
 
-def curl_json(url, method="GET", data=None, use_cookies=False):
-    cmd = ["curl", "-s", "--max-time", "20", "-A", UA, "-w", "\n%{http_code}"]
+# Berapa kali request dicoba ulang kalau jaringannya gagal sesaat (DNS,
+# putus, timeout, server 5xx). Bukan untuk error 4xx (login salah, tidak
+# lolos syarat, dsb.) — itu langsung gagal supaya tidak buang waktu.
+RETRY_ATTEMPTS = 5
+RETRYABLE_CURL_RC = {6, 7, 28, 35, 47, 52, 56}
+RETRYABLE_HTTP = {429, 500, 502, 503, 504}
+
+
+class _RetryableError(RuntimeError):
+    """Gagal sesaat (jaringan / server sibuk): boleh coba backend lain atau
+    coba lagi. Error lain (4xx, JSON rusak) langsung fatal."""
+
+
+def _read_cookies():
+    """Baca cookie sesi dari file (format Netscape, sama seperti yang curl
+    tulis) -> dict nama: nilai. Dipakai jalur Python supaya sesi login
+    yang dibuat curl (atau sebaliknya) tetap kebaca."""
+    cookies = {}
+    try:
+        with open(COOKIE_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) >= 7:
+                    cookies[parts[5]] = parts[6]
+    except OSError:
+        pass
+    return cookies
+
+
+def _write_cookies(cookies):
+    """Tulis cookie ke file format Netscape supaya curl juga bisa baca."""
+    try:
+        with open(COOKIE_FILE, "w") as f:
+            f.write("# Netscape HTTP Cookie File\n")
+            for name, value in cookies.items():
+                f.write(f".folester.xyz\tTRUE\t/\tTRUE\t0\t{name}\t{value}\n")
+        os.chmod(COOKIE_FILE, 0o600)
+    except OSError:
+        pass
+
+
+def _py_json(url, method="GET", data=None, use_cookies=False):
+    """Satu request JSON lewat http.client (Python murni)."""
+    u = urlparse(url)
+    host, port = u.hostname, u.port or 443
+    path = u.path or "/"
+    if u.query:
+        path += "?" + u.query
+    headers = {"User-Agent": UA, "Accept": "application/json",
+               "Accept-Encoding": "gzip"}
+    body = None
+    if method == "POST":
+        headers["Content-Type"] = "application/json"
+        body = json.dumps(data).encode() if data is not None else b"{}"
+    cookies = _read_cookies() if use_cookies else {}
+    if cookies:
+        headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+    conn = None
+    try:
+        raw = _raw_connect(host, port)
+        ctx = ssl.create_default_context()
+        ss = ctx.wrap_socket(raw, server_hostname=host)
+        ss.settimeout(20)
+        conn = http.client.HTTPSConnection(host, port, timeout=20)
+        conn.sock = ss
+        conn.request(method, path, body=body, headers=headers)
+        resp = conn.getresponse()
+        raw_body = resp.read()
+        if resp.getheader("Content-Encoding") == "gzip":
+            try:
+                raw_body = gzip.decompress(raw_body)
+            except (OSError, EOFError) as e:
+                raise _RetryableError(f"http {method} {url} gagal dekompresi gzip: {e}")
+        if use_cookies:
+            new = {}
+            for k, v in resp.getheaders():
+                if k.lower() == "set-cookie":
+                    pair = v.split(";", 1)[0]
+                    if "=" in pair:
+                        name, val = pair.split("=", 1)
+                        new[name.strip()] = val.strip()
+            if new:
+                cookies.update(new)
+                _write_cookies(cookies)
+        code = resp.status
+    except (OSError, socket.timeout, ssl.SSLError,
+            http.client.HTTPException) as e:
+        raise _RetryableError(f"http {method} {url} gagal: {e}")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    if code >= 400:
+        try:
+            err = json.loads(raw_body)
+            detail = err.get("error") or err
+        except (json.JSONDecodeError, AttributeError):
+            detail = raw_body[:200].decode(errors="replace")
+        msg = f"HTTP {code} dari {url}: {detail}"
+        if code in RETRYABLE_HTTP:
+            raise _RetryableError(msg)
+        raise RuntimeError(msg)
+    try:
+        return json.loads(raw_body)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"balasan bukan JSON dari {url}: {raw_body[:200]!r}")
+
+
+def _curl_json(url, method="GET", data=None, use_cookies=False):
+    """Satu request JSON lewat curl (cadangan kalau jalur Python gagal)."""
+    cmd = ["curl", "-s", "--compressed", "--max-time", "20", "-A", UA, "-w", "\n%{http_code}"]
     if use_cookies:
         cmd += ["-b", COOKIE_FILE, "-c", COOKIE_FILE]
     if method == "POST":
@@ -243,38 +372,50 @@ def curl_json(url, method="GET", data=None, use_cookies=False):
         if data is not None:
             cmd += ["-d", json.dumps(data)]
     cmd.append(url)
-    last_err = RuntimeError(f"curl {method} {url} gagal tanpa balasan")
-    for attempt in range(1, RETRY_ATTEMPTS + 1):
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        raise _RetryableError(f"curl {method} {url} timeout (>30 dtk)")
+    except OSError as e:
+        raise _RetryableError(f"curl {method} {url} gagal dijalankan: {e}")
+    if out.returncode != 0:
+        msg = f"curl {method} {url} gagal rc={out.returncode}: {out.stderr.strip()[:200]}"
+        if out.returncode in RETRYABLE_CURL_RC:
+            raise _RetryableError(msg)
+        raise RuntimeError(msg)
+    body, _, status = out.stdout.rpartition("\n")
+    try:
+        code = int(status.strip())
+    except ValueError:
+        code = 0
+    if code >= 400:
         try:
-            out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        except subprocess.TimeoutExpired:
-            last_err = RuntimeError(f"curl {method} {url} timeout (>30 dtk)")
-            out = None
-        if out is not None:
-            if out.returncode != 0:
-                last_err = RuntimeError(f"curl {method} {url} gagal rc={out.returncode}: {out.stderr.strip()[:200]}")
-                if out.returncode not in RETRYABLE_CURL_RC:
-                    raise last_err
-            else:
-                body, _, status = out.stdout.rpartition("\n")
-                try:
-                    code = int(status.strip())
-                except ValueError:
-                    code = 0
-                if code >= 400:
-                    try:
-                        err = json.loads(body)
-                        detail = err.get("error") or err
-                    except (json.JSONDecodeError, AttributeError):
-                        detail = body[:200]
-                    last_err = RuntimeError(f"HTTP {code} dari {url}: {detail}")
-                    if code not in RETRYABLE_HTTP:
-                        raise last_err
-                else:
-                    try:
-                        return json.loads(body)
-                    except json.JSONDecodeError:
-                        raise RuntimeError(f"balasan bukan JSON dari {url}: {body[:200]}")
+            err = json.loads(body)
+            detail = err.get("error") or err
+        except (json.JSONDecodeError, AttributeError):
+            detail = body[:200]
+        msg = f"HTTP {code} dari {url}: {detail}"
+        if code in RETRYABLE_HTTP:
+            raise _RetryableError(msg)
+        raise RuntimeError(msg)
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"balasan bukan JSON dari {url}: {body[:200]}")
+
+
+def http_json(url, method="GET", data=None, use_cookies=False):
+    """Request JSON: coba Python murni dulu, kalau gagal coba curl.
+    Gagal sesaat dicoba ulang (5x, jeda 1/2/4/8 dtk); error 4xx (login salah,
+    tidak lolos syarat, dsb.) langsung gagal supaya tidak buang waktu."""
+    last_err = RuntimeError(f"http {method} {url} gagal tanpa balasan")
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        for backend in (_py_json, _curl_json):
+            try:
+                return backend(url, method, data, use_cookies)
+            except _RetryableError as e:
+                last_err = e
+                continue
         if attempt < RETRY_ATTEMPTS:
             wait = 2 ** (attempt - 1)
             log(f"jaringan gagal ({last_err}), coba lagi {attempt + 1}/{RETRY_ATTEMPTS} setelah {wait} dtk")
@@ -299,7 +440,7 @@ WS_PATH = "/api/live"
 _WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
-def _ws_raw_connect(host, port):
+def _raw_connect(host, port):
     """Koneksi TCP. Coba langsung dulu; kalau gagal dan ada proxy di env
     (VM Muse), lewat CONNECT proxy itu. Di Termux tidak ada proxy env,
     jadi selalu langsung. Kredensial proxy dibaca dari env saat jalan,
@@ -334,7 +475,7 @@ def _ws_raw_connect(host, port):
 
 
 def _ws_connect(host, port, path):
-    raw = _ws_raw_connect(host, port)
+    raw = _raw_connect(host, port)
     use_tls = (port == 443)
     ss = raw
     if use_tls:
@@ -545,7 +686,7 @@ def load_keypair(path):
 
 def sign_in(wallet, seed):
     """Minta nonce, tanda tangani pesan login, verifikasi. Kembalikan True kalau OK."""
-    d = curl_json(f"{BASE}/api/auth/nonce", method="POST", data={"wallet": wallet})
+    d = http_json(f"{BASE}/api/auth/nonce", method="POST", data={"wallet": wallet})
     nonce, message = d.get("nonce"), d.get("message", "")
     if not nonce or not message:
         raise RuntimeError(f"nonce tidak didapat: {d}")
@@ -556,7 +697,7 @@ def sign_in(wallet, seed):
         raise RuntimeError("pesan login tidak menyebut wallet/nonce ini, BERHENTI")
     sig = ed25519_sign(message.encode(), seed, ed25519_publickey(seed))
     sig_b64 = base64.b64encode(sig).decode()
-    r = curl_json(f"{BASE}/api/auth/verify", method="POST",
+    r = http_json(f"{BASE}/api/auth/verify", method="POST",
                   data={"wallet": wallet, "nonce": nonce, "message": message,
                         "signature": sig_b64}, use_cookies=True)
     if isinstance(r, dict) and r.get("error"):
@@ -566,7 +707,7 @@ def sign_in(wallet, seed):
 
 
 def get_me(wallet):
-    return curl_json(f"{BASE}/api/play/me?wallet={wallet}", use_cookies=True)
+    return http_json(f"{BASE}/api/play/me?wallet={wallet}", use_cookies=True)
 
 
 def ensure_joined(wallet):
@@ -586,7 +727,7 @@ def ensure_joined(wallet):
     # Belum terdaftar: situs menghitung gate lewat /api/scan dulu, baru /join.
     log("belum terdaftar sebagai pemain, menjalankan scan kelayakan...")
     for i in range(40):
-        s = curl_json(f"{BASE}/api/scan", method="POST", data={}, use_cookies=True)
+        s = http_json(f"{BASE}/api/scan", method="POST", data={}, use_cookies=True)
         if isinstance(s, dict) and s.get("status") in ("done", "registered"):
             break
         if isinstance(s, dict) and s.get("error"):
@@ -600,7 +741,7 @@ def ensure_joined(wallet):
             ", ".join(f"{c['key']}={'OK' if c.get('ok') else 'FAIL'}({c.get('have')}/{c.get('need')})"
                       for c in checks))
     log("mencoba join...")
-    r = curl_json(f"{BASE}/api/play/join", method="POST", data={}, use_cookies=True)
+    r = http_json(f"{BASE}/api/play/join", method="POST", data={}, use_cookies=True)
     if isinstance(r, dict) and r.get("error"):
         raise RuntimeError(f"join gagal: {r} — wallet ini tidak lolos syarat Folester")
     me = get_me(wallet)
@@ -615,7 +756,7 @@ def ensure_joined(wallet):
 # Pantau + beli
 # ---------------------------------------------------------------------------
 def fetch_frames():
-    d = curl_json(f"{BASE}/api/play/frames?sort=created_at&q=")
+    d = http_json(f"{BASE}/api/play/frames?sort=created_at&q=")
     frames = sorted(d.get("frames", []), key=lambda f: f["created_at"])
     return frames
 
@@ -623,14 +764,14 @@ def fetch_frames():
 def buy(frame, amount, wallet, seed, state):
     body = {"frameId": frame["id"], "side": "buy", "amount": amount}
     try:
-        r = curl_json(f"{BASE}/api/play/trade", method="POST", data=body, use_cookies=True)
+        r = http_json(f"{BASE}/api/play/trade", method="POST", data=body, use_cookies=True)
     except RuntimeError as e:
         if "sign_in_required" in str(e) and not state.get("reauth_done"):
             log("sesi habis, login ulang...")
             sign_in(wallet, seed)
             state["reauth_done"] = True
             try:
-                r = curl_json(f"{BASE}/api/play/trade", method="POST", data=body, use_cookies=True)
+                r = http_json(f"{BASE}/api/play/trade", method="POST", data=body, use_cookies=True)
             except RuntimeError as e2:
                 log(f"BUY {frame['name']} gagal HTTP: {e2}")
                 return None
@@ -642,7 +783,7 @@ def buy(frame, amount, wallet, seed, state):
         sign_in(wallet, seed)
         state["reauth_done"] = True
         try:
-            r = curl_json(f"{BASE}/api/play/trade", method="POST", data=body, use_cookies=True)
+            r = http_json(f"{BASE}/api/play/trade", method="POST", data=body, use_cookies=True)
         except RuntimeError as e:
             log(f"BUY {frame['name']} gagal HTTP: {e}")
             return None
@@ -658,7 +799,7 @@ def main():
     ap = argparse.ArgumentParser(description="Folester testnet auto-buy (Termux)")
     ap.add_argument("--keypair", required=True, help="path file keypair Solana, mis. ~/.config/solana/id.json")
     ap.add_argument("--amount", type=float, default=100, help="ANUL per Frame baru (min 1)")
-    ap.add_argument("--interval", type=float, default=0.5, help="detik antar cek")
+    ap.add_argument("--interval", type=float, default=30, help="detik antar cek polling cadangan (deteksi cepat lewat websocket; polling cuma cadangan kalau WS putus)")
     ap.add_argument("--heartbeat", type=float, default=3, help="detik antar kabar berkala di log (0 = mati)")
     ap.add_argument("--no-ws", action="store_true", help="matikan websocket, cuma pakai polling")
     ap.add_argument("--max-buys", type=int, default=50, help="berhenti setelah sekian beli")
