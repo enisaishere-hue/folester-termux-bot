@@ -17,6 +17,16 @@
 #        bot menunggu sampai umurnya 0,5 detik dulu baru beli. Kalau server
 #        menolak dengan launch_wait (trading Frame itu belum dibuka), bot
 #        coba lagi tiap 0,5 detik sampai umur Frame 120 detik.
+#   PENTING — aturan server Folester (dari kode situsnya sendiri):
+#     * Trading baru dibuka 30 detik setelah Frame dibuat. Jadi beli di
+#       umur 0,5 detik itu SELALU ditolak dulu (launch_wait); bot coba lagi
+#       tiap 0,5 detik sampai umur 30 detik, baru berhasil beli.
+#     * Ada jeda 2 detik antar trade (trade_cooldown). Kalau kena, bot
+#       menunggu 2,1 detik sebelum coba lagi.
+#   Setelah beli berhasil, bot OTOMATIS MENJUAL lagi 10 detik kemudian
+#   (--auto-sell-delay) — semua token yang didapat dari beli itu — supaya
+#   modal kembali dan bisa dipakai beli Frame berikutnya. Jual tidak
+#   melihat harga: kalau harga turun dalam 10 detik itu, jualnya rugi.
 #     2. Polling daftar Frame tiap 30 detik — jalur CADANGAN. Kalau websocket
 #        putus, polling tetap jalan, jadi bot tidak pernah buta. Websocket
 #        yang putus disambung lagi otomatis (backoff 1-30 dtk).
@@ -40,6 +50,11 @@
 #     airdrop bisa dibatalkan, dihapus dari leaderboard, atau wallet diblokir.
 #     Poin dibagikan manual tiap minggu; 150 jt $ANUL direncanakan untuk
 #     Airdrop 2 tapi konversinya belum diputuskan.
+#   - Auto-sell tidak melihat harga: 10 detik setelah beli, bot menjual
+#     apa pun harganya. Kalau harga turun, modal kembali lebih kecil dari
+#     100 ANUL (rugi + fee 2x). Kalau naik, untung. Posisi juga bisa
+#     terkunci sebagian oleh server — kalau begitu bot menjual sebanyak
+#     yang bisa dijual, sisanya ditahan.
 #   - "Pembeli pertama" tidak bisa dijamin: trade pertama sebuah Frame
 #     mendarat ~1 detik setelah dibuat (biasanya AI trader situs / kreator),
 #     dan bot membeli 0,5 detik setelah Frame dibuat — jadi bot biasanya
@@ -81,6 +96,7 @@
 #   --max-age 120    = cuma beli Frame yang umurnya <=120 detik saat ketemu
 #   --buy-delay 0.5  = beli saat Frame berumur 0,5 detik setelah launch
 #   --launch-wait-retry 0.5 = jeda detik antar coba ulang saat server bilang launch_wait
+#   --auto-sell-delay 10 = jual otomatis 10 dtk setelah beli (0 = mati)
 #   --cookies FILE   = file cookie sesi (default ~/.folester_session_cookies.txt).
 #                      WAJIB beda tiap akun kalau jalan 2 bot sekaligus —
 #                      kalau sama, sesinya saling timpa dan bot login melulu.
@@ -780,41 +796,93 @@ def fetch_frames():
     return frames
 
 
-def buy(frame, amount, wallet, seed, state):
-    """Satu percobaan beli. Kembalikan (status, hasil):
-    'ok' = berhasil, 'launch_wait' = server bilang Frame masih dalam masa
-    tunggu launch (coba lagi nanti, jangan anggap gagal), 'fail' = gagal lain."""
-    body = {"frameId": frame["id"], "side": "buy", "amount": amount}
+# Jeda antar trade yang dipaksakan server Folester: 2 detik. Kalau kena
+# trade_cooldown, bot menunggu sedikit lebih lama (2,1 dtk) sebelum coba lagi.
+TRADE_COOLDOWN_RETRY = 2.1
+# Kalau posisi terkunci semua saat mau auto-sell, coba lagi tiap 5 dtk...
+SELL_LOCK_RETRY = 5.0
+# ...sampai 300 dtk sesudah jadwal jual; kalau tetap gagal, posisi ditahan.
+SELL_MAX_WAIT = 300
+
+
+def _num(v):
+    try:
+        return float(v or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _do_trade(frame, side, amount, wallet, seed, state):
+    """Satu percobaan trade (buy/sell). Kembalikan (status, hasil, lock):
+    'ok' = berhasil; 'launch_wait' / 'trade_cooldown' = coba lagi nanti;
+    'position_locked' = sebagian/seluruh posisi terkunci (lock berisi
+    available_qty dsb.); 'fail' = gagal lain."""
+    body = {"frameId": frame["id"], "side": side, "amount": amount}
+    tag = side.upper()
     for _attempt in range(2):  # percobaan ke-2 hanya sesudah login ulang
         try:
             r = http_json(f"{BASE}/api/play/trade", method="POST", data=body, use_cookies=True)
         except RuntimeError as e:
-            if "launch_wait" in str(e):
-                log(f"BUY {frame['name']} masih launch_wait, coba lagi nanti")
-                return "launch_wait", None
-            if "sign_in_required" in str(e) and not state.get("reauth_done"):
+            msg = str(e)
+            if "launch_wait" in msg:
+                log(f"{tag} {frame['name']} masih launch_wait, coba lagi nanti")
+                return "launch_wait", None, None
+            if "trade_cooldown" in msg:
+                log(f"{tag} {frame['name']} kena trade_cooldown, coba lagi nanti")
+                return "trade_cooldown", None, None
+            if "sign_in_required" in msg and not state.get("reauth_done"):
                 log("sesi habis, login ulang...")
                 sign_in(wallet, seed)
                 state["reauth_done"] = True
                 continue
-            log(f"BUY {frame['name']} gagal HTTP: {e}")
-            return "fail", None
+            log(f"{tag} {frame['name']} gagal HTTP: {e}")
+            return "fail", None, None
         if isinstance(r, dict) and r.get("error"):
-            if r.get("error") == "launch_wait":
-                log(f"BUY {frame['name']} masih launch_wait, coba lagi nanti")
-                return "launch_wait", None
-            if r.get("error") == "sign_in_required" and not state.get("reauth_done"):
+            err = r.get("error")
+            if err == "launch_wait":
+                log(f"{tag} {frame['name']} masih launch_wait, coba lagi nanti")
+                return "launch_wait", None, None
+            if err == "trade_cooldown":
+                log(f"{tag} {frame['name']} kena trade_cooldown, coba lagi nanti")
+                return "trade_cooldown", None, None
+            if err == "position_locked":
+                return "position_locked", None, r.get("lock") or {}
+            if err == "sign_in_required" and not state.get("reauth_done"):
                 log("sesi habis, login ulang...")
                 sign_in(wallet, seed)
                 state["reauth_done"] = True
                 continue
-            log(f"BUY {frame['name']} ditolak: {r}")
-            return "fail", None
+            log(f"{tag} {frame['name']} ditolak: {r}")
+            return "fail", None, None
+        return "ok", r, None
+    log(f"{tag} {frame['name']} gagal: sesi habis sesudah login ulang")
+    return "fail", None, None
+
+
+def buy(frame, amount, wallet, seed, state):
+    """Satu percobaan beli. Kembalikan (status, hasil) — lihat _do_trade."""
+    status, r, _lock = _do_trade(frame, "buy", amount, wallet, seed, state)
+    if status == "ok":
         log(f"BUY {frame['name']} amount={amount} ANUL -> dapat {r.get('base')} token, "
             f"harga {r.get('quote')} ANUL, fee {r.get('fee')}")
-        return "ok", r
-    log(f"BUY {frame['name']} gagal: sesi habis sesudah login ulang")
-    return "fail", None
+    return status, r
+
+
+def sell(frame, amount_tokens, wallet, seed, state):
+    """Satu percobaan jual (amount dalam TOKEN). Kembalikan
+    (status, hasil, lock) — lihat _do_trade."""
+    status, r, lock = _do_trade(frame, "sell", amount_tokens, wallet, seed, state)
+    if status == "ok":
+        realized = r.get("realized")
+        pl = ""
+        if realized is not None:
+            try:
+                pl = f", {'Profit' if float(realized) >= 0 else 'Loss'} {abs(float(realized)):.2f}"
+            except (TypeError, ValueError):
+                pl = ""
+        log(f"SELL {frame['name']} {r.get('base')} token -> dapat "
+            f"{_num(r.get('quote')) - _num(r.get('fee')):.2f} ANUL (fee {r.get('fee')}){pl}")
+    return status, r, lock
 
 
 def main():
@@ -830,6 +898,7 @@ def main():
     ap.add_argument("--max-age", type=int, default=120, help="cuma beli Frame umur <= sekian detik")
     ap.add_argument("--buy-delay", type=float, default=0.5, help="beli saat Frame berumur sekian detik setelah launch (default 0.5)")
     ap.add_argument("--launch-wait-retry", type=float, default=0.5, help="jeda detik antar coba ulang saat server bilang launch_wait")
+    ap.add_argument("--auto-sell-delay", type=float, default=10.0, help="jual otomatis sekian detik setelah beli (0 = mati)")
     ap.add_argument("--cookies", default=None, help="file cookie sesi (default ~/.folester_session_cookies.txt; wajib beda tiap akun kalau jalan 2 bot sekaligus)")
     ap.add_argument("--once", action="store_true", help="cek sekali lalu keluar")
     ap.add_argument("--check-only", action="store_true", help="cuma login + cek saldo, tanpa beli")
@@ -864,6 +933,7 @@ def main():
 
     seen = set()
     pending = {}  # frame_id -> {frame, created, next_try}: antre retry launch_wait
+    pending_sells = {}  # frame_id -> {frame, amount, next_try, deadline}: antre auto-sell
     spent, buys = 0.0, 0
     state = {"reauth_done": False}
     first = True
@@ -879,6 +949,33 @@ def main():
                                      args=(ws_queue, ws_status, ws_stop),
                                      daemon=True)
         ws_thread.start()
+
+    def _retry_delay(status):
+        if status == "trade_cooldown":
+            return TRADE_COOLDOWN_RETRY
+        return a.launch_wait_retry
+
+    def schedule_sell(f, buy_result):
+        """Antrekan auto-sell: jual semua token hasil beli ini sekian detik
+        lagi. Tidak dipakai kalau --auto-sell-delay 0."""
+        if a.auto_sell_delay <= 0:
+            return
+        base_amt = _num(buy_result.get("base"))
+        if base_amt <= 0:
+            log(f"auto-sell {f['name']} dilewati: jumlah token dari hasil beli tidak jelas ({buy_result.get('base')})")
+            return
+        at = time.monotonic() + a.auto_sell_delay
+        pending_sells[f["id"]] = {"frame": f, "amount": base_amt,
+                                  "next_try": at,
+                                  "deadline": at + SELL_MAX_WAIT}
+        log(f"auto-sell {f['name']} dijadwalkan {a.auto_sell_delay:g} dtk lagi ({base_amt:g} token)")
+
+    def on_buy_success(f, r):
+        nonlocal buys, spent, balance
+        buys += 1
+        spent += a.amount
+        balance = float(get_me(wallet).get("player", {}).get("balance") or balance - a.amount)
+        schedule_sell(f, r)
 
     def process_frame(f, now, is_live=False):
         """Satu Frame kandidat -> beli kalau lolos semua syarat.
@@ -919,16 +1016,16 @@ def main():
         log(f"FRAME BARU {f['name']} umur={age:.1f} dtk harga={f['price']:.6f} ANUL trades={f.get('trades', 0)} [{src}]")
         status, r = buy(f, a.amount, wallet, seed, state)
         if status == "ok":
-            buys += 1
-            spent += a.amount
-            balance = float(get_me(wallet).get("player", {}).get("balance") or balance - a.amount)
-        elif status == "launch_wait":
-            # Server belum membuka trading untuk Frame ini. Jangan anggap
-            # gagal: antrekan ulang sampai umurnya melewati max_age. Antrean
-            # ini dicek tiap putaran loop tanpa menghentikan deteksi Frame baru.
+            on_buy_success(f, r)
+        elif status in ("launch_wait", "trade_cooldown"):
+            # Server belum membuka trading untuk Frame ini (launch_wait) atau
+            # kena jeda antar trade (trade_cooldown). Jangan anggap gagal:
+            # antrekan ulang sampai umurnya melewati max_age. Antrean ini
+            # dicek tiap putaran loop tanpa menghentikan deteksi Frame baru.
+            delay = _retry_delay(status)
             pending[f["id"]] = {"frame": f, "created": created,
-                                "next_try": time.monotonic() + a.launch_wait_retry}
-            log(f"antre retry {f['name']} (launch_wait), coba lagi {a.launch_wait_retry:g} dtk lagi")
+                                "next_try": time.monotonic() + delay}
+            log(f"antre retry {f['name']} ({status}), coba lagi {delay:g} dtk lagi")
         return False
 
     def retry_pending(now):
@@ -950,15 +1047,49 @@ def main():
             log(f"retry BUY {p['frame']['name']} (umur {age:.0f} dtk)")
             status, r = buy(p["frame"], a.amount, wallet, seed, state)
             if status == "ok":
-                buys += 1
-                spent += a.amount
-                balance = float(get_me(wallet).get("player", {}).get("balance") or balance - a.amount)
+                on_buy_success(p["frame"], r)
                 del pending[fid]
-            elif status == "launch_wait":
-                p["next_try"] = time.monotonic() + a.launch_wait_retry
+            elif status in ("launch_wait", "trade_cooldown"):
+                p["next_try"] = time.monotonic() + _retry_delay(status)
             else:
                 del pending[fid]
         return False
+
+    def process_sells():
+        """Jual posisi yang sudah waktunya (auto-sell). Tidak menghentikan bot."""
+        nonlocal spent, balance
+        for fid in list(pending_sells.keys()):
+            s = pending_sells[fid]
+            if time.monotonic() < s["next_try"]:
+                continue
+            if time.monotonic() > s["deadline"]:
+                log(f"auto-sell {s['frame']['name']} BERHENTI: tidak berhasil sampai batas waktu, posisi ditahan (jual manual)")
+                del pending_sells[fid]
+                continue
+            status, r, lock = sell(s["frame"], s["amount"], wallet, seed, state)
+            if status == "ok":
+                spent = max(0.0, spent - (_num(r.get("quote")) - _num(r.get("fee"))))
+                try:
+                    balance = float(get_me(wallet).get("player", {}).get("balance") or balance)
+                except Exception as e:
+                    log(f"saldo gagal diperbarui sesudah sell: {e}")
+                del pending_sells[fid]
+            elif status in ("launch_wait", "trade_cooldown"):
+                s["next_try"] = time.monotonic() + _retry_delay(status)
+            elif status == "position_locked":
+                avail = _num((lock or {}).get("available_qty"))
+                if 0 < avail < s["amount"]:
+                    log(f"auto-sell {s['frame']['name']}: posisi terkunci sebagian, jual {avail:g} token saja")
+                    s["amount"] = avail
+                    s["next_try"] = time.monotonic() + 1.0
+                elif avail <= 0:
+                    log(f"auto-sell {s['frame']['name']}: posisi terkunci semua, coba lagi {SELL_LOCK_RETRY:g} dtk lagi")
+                    s["next_try"] = time.monotonic() + SELL_LOCK_RETRY
+                else:
+                    s["next_try"] = time.monotonic() + 1.0
+            else:
+                log(f"auto-sell {s['frame']['name']} GAGAL, posisi ditahan (jual manual)")
+                del pending_sells[fid]
 
     last_poll = 0.0
     while True:
@@ -989,7 +1120,9 @@ def main():
         if retry_pending(now):
             ws_stop.set()
             return 0
-        # 3. Jalur polling cadangan tiap a.interval detik: daftar lengkap,
+        # 3. Auto-sell posisi yang sudah waktunya.
+        process_sells()
+        # 4. Jalur polling cadangan tiap a.interval detik: daftar lengkap,
         # kalau WS ketinggalan.
         if time.monotonic() - last_poll >= a.interval:
             last_poll = time.monotonic()

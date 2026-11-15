@@ -97,9 +97,27 @@ Opsi lain: `--amount 100` (ANUL per Frame), `--interval 30` (detik antar cek
 polling cadangan), `--no-ws` (matikan websocket), `--max-buys 50`, `--budget 5000`,
 `--reserve 100`, `--max-age 120`, `--buy-delay 0.5` (beli saat Frame berumur
 0,5 detik setelah launch), `--launch-wait-retry 0.5` (jeda detik antar coba ulang
-saat server bilang `launch_wait`), `--cookies FILE` (file cookie sesi, wajib
+saat server bilang `launch_wait`), `--auto-sell-delay 10` (jual otomatis 10
+detik setelah beli, 0 = mati), `--cookies FILE` (file cookie sesi, wajib
 beda tiap akun kalau jalan 2 bot sekaligus), `--once` (cek sekali),
 `--check-only` (cuma login + cek saldo).
+
+## Auto-sell (modal muter)
+
+Setelah beli berhasil, bot otomatis menjual lagi 10 detik kemudian
+(`--auto-sell-delay 10`) — semua token yang didapat dari beli itu — supaya
+modal kembali dan bisa dipakai beli Frame berikutnya. Jual tidak melihat
+harga: kalau harga turun dalam 10 detik itu, jualnya rugi (plus fee 2x).
+Kalau posisi terkunci sebagian oleh server, bot menjual sebanyak yang bisa
+dijual; kalau terkunci semua, bot coba lagi tiap 5 detik sampai 5 menit,
+lewat dari itu posisi ditahan dan harus dijual manual.
+
+Dua aturan server yang perlu diketahui (dari kode situs Folester sendiri):
+trading baru dibuka **30 detik** setelah Frame dibuat — jadi beli di umur
+0,5 detik itu selalu ditolak dulu (`launch_wait`), bot coba lagi tiap
+0,5 detik sampai umur 30 detik baru berhasil. Dan ada jeda **2 detik**
+antar trade (`trade_cooldown`); kalau kena, bot menunggu 2,1 detik
+sebelum coba lagi.
 
 ## 2 akun sekaligus
 
