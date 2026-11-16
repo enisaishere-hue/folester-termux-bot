@@ -1,10 +1,14 @@
 #!/bin/sh
 # Jalankan bot Folester (pakai pengaturan dari config.json).
 # Bisa dipanggil sebagai `mulai` dari mana saja setelah dipasang sekali:
-#   mkdir -p ~/bin
-#   ln -sf ~/folester-termux-bot/mulai ~/bin/mulai
-#   echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
-# (tetap bisa juga dipakai lama: cd ~/folester-termux-bot && ./mulai)
+#   cd ~/folester-termux-bot && git pull && sh pasang
+#   source ~/.bashrc
+#   mulai
+# (JANGAN symlink langsung ke file ini: file di repo tidak punya izin
+# eksekusi, symlink-nya ikut gagal "Permission denied". `pasang` membuat
+# wrapper di ~/bin yang menjalankan file ini lewat `sh`.)
+# (tetap bisa juga dipakai lama: cd ~/folester-termux-bot && ./mulai —
+# kalau "Permission denied", jalankan dulu chmod +x mulai mulai2)
 # Kalau belum ada config.json, jalankan dulu: python3 atur.py
 #
 # Kenapa dulu kadang kelihatan stuck: script lama diam saja saat `git pull`

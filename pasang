@@ -1,0 +1,35 @@
+#!/bin/sh
+# Pasang perintah `mulai` / `mulai2` supaya bisa diketik dari mana saja.
+# Dijalankan dengan `sh` (tidak butuh izin eksekusi):
+#   cd ~/folester-termux-bot && git pull && sh pasang
+#   source ~/.bashrc
+#   mulai
+#
+# Kenapa pakai wrapper, bukan symlink: file `mulai` di repo TIDAK PUNYA
+# izin eksekusi (mode 100644) — GitHub tidak menyimpan mode +x untuk file
+# yang di-push lewat API, dan `git pull` menimpa mode lokal jadi 100644
+# lagi ("mode change 100755 => 100644"). Symlink ke file tanpa +x ikut
+# gagal ("Permission denied"). Wrapper di ~/bin ini dibuat di HP sendiri
+# dan diberi +x di sini, isinya cuma `sh .../mulai` — jadi `git pull`
+# berikutnya tidak bisa merusaknya lagi. `pasang` juga memberi +x pada
+# file repo supaya `./mulai` bisa dipakai sampai `git pull` berikutnya
+# menyentuhnya lagi; kalau itu terjadi, jalankan `sh pasang` ulang.
+set -e
+REPO="$HOME/folester-termux-bot"
+mkdir -p "$HOME/bin"
+cat > "$HOME/bin/mulai" <<'EOF'
+#!/bin/sh
+exec sh "$HOME/folester-termux-bot/mulai" "$@"
+EOF
+cat > "$HOME/bin/mulai2" <<'EOF'
+#!/bin/sh
+exec sh "$HOME/folester-termux-bot/mulai2" "$@"
+EOF
+chmod +x "$HOME/bin/mulai" "$HOME/bin/mulai2"
+chmod +x "$REPO/mulai" "$REPO/mulai2" 2>/dev/null || true
+if ! grep -qs 'HOME/bin' "$HOME/.bashrc"; then
+  echo 'export PATH="$HOME/bin:$PATH"' >> "$HOME/.bashrc"
+  echo "PATH ditambahkan ke ~/.bashrc"
+fi
+echo "Terpasang. Jalankan: source ~/.bashrc"
+echo "Lalu ketik: mulai"

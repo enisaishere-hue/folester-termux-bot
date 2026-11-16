@@ -3,8 +3,9 @@
 # dan file cookie sesi sendiri (supaya tidak bentrok dengan bot utama).
 # Bot utama tetap jalan; mulai2 hanya mematikan bot akun kedua yang lama.
 # Bisa dipanggil sebagai `mulai2` dari mana saja setelah dipasang sekali:
-#   ln -sf ~/folester-termux-bot/mulai2 ~/bin/mulai2
-# (lihat `mulai` untuk cara pasang ~/bin ke PATH.)
+#   cd ~/folester-termux-bot && sh pasang
+# (lihat `mulai` untuk alasannya: symlink langsung gagal karena file repo
+# tidak punya izin eksekusi.)
 # Sama seperti `mulai`: mencetak tiap langkah dan `git pull` dibatasi
 # 15 detik supaya tidak kelihatan stuck saat jaringan lambat.
 

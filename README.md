@@ -14,16 +14,24 @@ pkill -f bot.py   # berhenti
 ```
 
 `mulai` bisa diketik dari mana saja, tanpa `cd` dan tanpa `./` — pasang
-sekali saja (setelah `git pull` pertama yang membawa versi ini):
+sekali saja dengan `sh pasang` (setelah `git pull` pertama yang membawa
+versi ini):
 
 ```sh
 cd ~/folester-termux-bot && git pull
-mkdir -p ~/bin
-ln -sf ~/folester-termux-bot/mulai ~/bin/mulai
-ln -sf ~/folester-termux-bot/mulai2 ~/bin/mulai2
-echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+sh pasang
+source ~/.bashrc
 mulai
 ```
+
+`pasang` membuat pembungkus di `~/bin` yang menjalankan `mulai` lewat
+`sh`, jadi tidak tergantung izin eksekusi file di repo. Jangan pasang
+dengan symlink (`ln -sf .../mulai ~/bin/mulai`): file `mulai` di repo
+tidak punya izin eksekusi (mode 100644), jadi symlink-nya ikut gagal
+dengan "Permission denied" — itu yang terjadi kalau `git pull` menampilkan
+`mode change 100755 => 100644 mulai`. Kalau `mulai` gagal begitu, perbaikan
+cepatnya: `chmod +x ~/folester-termux-bot/mulai ~/folester-termux-bot/mulai2`,
+lalu jalankan `sh pasang` supaya tidak terulang di `git pull` berikutnya.
 
 Kalau lagi stuck di layar `./mulai` yang kosong, tekan `Ctrl+C` dulu —
 itu `git pull` yang nunggu jaringan tanpa batas waktu. Versi baru mencetak
