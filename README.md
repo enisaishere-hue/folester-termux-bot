@@ -8,10 +8,27 @@ beli pakai saldo `$ANUL` simulasi — bukan SOL asli, bukan transaksi blockchain
 
 ```sh
 python3 atur.py   # jawab pertanyaan (Enter = pakai nilai lama), tersimpan di config.json
-./mulai           # bot jalan (otomatis update + matikan bot lama dulu)
+mulai             # bot jalan (otomatis update + matikan bot lama dulu)
 log               # lihat log live (Ctrl+C buat keluar)
 pkill -f bot.py   # berhenti
 ```
+
+`mulai` bisa diketik dari mana saja, tanpa `cd` dan tanpa `./` — pasang
+sekali saja (setelah `git pull` pertama yang membawa versi ini):
+
+```sh
+cd ~/folester-termux-bot && git pull
+mkdir -p ~/bin
+ln -sf ~/folester-termux-bot/mulai ~/bin/mulai
+ln -sf ~/folester-termux-bot/mulai2 ~/bin/mulai2
+echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+mulai
+```
+
+Kalau lagi stuck di layar `./mulai` yang kosong, tekan `Ctrl+C` dulu —
+itu `git pull` yang nunggu jaringan tanpa batas waktu. Versi baru mencetak
+tiap langkah dan `git pull` dibatasi 15 detik: kalau lewat, bot tetap jalan
+pakai versi lokal. Cara lama tetap bisa: `cd ~/folester-termux-bot && ./mulai`.
 
 `config.json` berisi pengaturanmu (file keypair, ANUL per beli, delay beli,
 delay jual, dst.) dan tidak ikut ke Git — aman dari `git pull`. Semua nilai

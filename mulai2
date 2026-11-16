@@ -2,9 +2,33 @@
 # Jalankan bot akun kedua (AKG8) — pengaturan dari config.json, tapi keypair
 # dan file cookie sesi sendiri (supaya tidak bentrok dengan bot utama).
 # Bot utama tetap jalan; mulai2 hanya mematikan bot akun kedua yang lama.
-cd "$(dirname "$0")" || exit 1
+# Bisa dipanggil sebagai `mulai2` dari mana saja setelah dipasang sekali:
+#   ln -sf ~/folester-termux-bot/mulai2 ~/bin/mulai2
+# (lihat `mulai` untuk cara pasang ~/bin ke PATH.)
+# Sama seperti `mulai`: mencetak tiap langkah dan `git pull` dibatasi
+# 15 detik supaya tidak kelihatan stuck saat jaringan lambat.
+
+SCRIPT="$0"
+if command -v readlink >/dev/null 2>&1; then
+  RESOLVED=$(readlink -f "$SCRIPT" 2>/dev/null || echo "$SCRIPT")
+else
+  RESOLVED="$SCRIPT"
+fi
+DIR=$(dirname "$RESOLVED")
+if [ ! -f "$DIR/config.json" ] && [ -f "$HOME/folester-termux-bot/config.json" ]; then
+  DIR="$HOME/folester-termux-bot"
+fi
+cd "$DIR" || exit 1
+echo "Memulai bot akun kedua..."
+echo "Mematikan bot akun kedua yang lama..."
 pkill -f "bacj-key.txt" 2>/dev/null
 sleep 2
-git pull -q 2>/dev/null || true
+echo "Mengupdate dari GitHub (maks 15 detik)..."
+if command -v timeout >/dev/null 2>&1; then
+  timeout 15 git pull -q 2>/dev/null || echo "  (update dilewati: jaringan lambat / git pull >15 dtk — lanjut pakai versi lokal)"
+else
+  git pull -q 2>/dev/null || true
+fi
+echo "Menjalankan bot akun kedua..."
 nohup python3 bot.py --keypair ~/bacj-key.txt --cookies ~/.folester_session_cookies-akg8.txt > folester-akg8.log 2>&1 &
 echo "Bot akun kedua jalan (PID $!). Cek log: log2"
