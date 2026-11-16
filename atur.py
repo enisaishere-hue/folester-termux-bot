@@ -77,7 +77,8 @@ def _tanya(label, kunci, cfg, tipe=float):
         if raw == "":
             return lama
         try:
-            return tipe(raw)
+            # Terima koma desimal Indonesia (0,5) maupun titik (0.5).
+            return tipe(raw.replace(",", "."))
         except ValueError:
             print("  Bukan angka yang benar, coba lagi.")
 

@@ -933,24 +933,43 @@ def _resolve_args(a, cfg):
     dari default. Perintah selalu menang atas config.json."""
     for k, d in DEFAULTS.items():
         if getattr(a, k, None) is None:
-            setattr(a, k, cfg.get(k, d))
+            v = cfg.get(k, d)
+            # config.json yang diedit manual bisa berisi "0,5" (string koma)
+            # — ubah ke angka hanya untuk pengaturan numerik, bukan path.
+            if isinstance(v, str) and isinstance(d, (int, float)):
+                v = v.replace(",", ".")
+                try:
+                    v = float(v) if isinstance(d, float) else int(float(v))
+                except (TypeError, ValueError):
+                    v = d
+            setattr(a, k, v)
     return a
+
+
+def _angka(s):
+    """float yang terima koma desimal Indonesia (0,5) maupun titik (0.5)."""
+    return float(str(s).replace(",", "."))
+
+
+def _bilangan_bulat(s):
+    """int yang terima koma desimal Indonesia (mis. 50,0 -> 50)."""
+    return int(float(str(s).replace(",", ".")))
 
 
 def main():
     ap = argparse.ArgumentParser(description="Folester testnet auto-buy (Termux)")
     ap.add_argument("--keypair", default=None, help="path file keypair Solana, mis. ~/bacj-key.txt (atau isi di config.json lewat python3 atur.py)")
-    ap.add_argument("--amount", type=float, default=None, help="ANUL per Frame baru (min 1)")
-    ap.add_argument("--interval", type=float, default=None, help="detik antar cek polling cadangan (deteksi cepat lewat websocket; polling cuma cadangan kalau WS putus)")
-    ap.add_argument("--heartbeat", type=float, default=None, help="detik antar kabar berkala di log (0 = mati)")
+    ap.add_argument("--amount", type=_angka, default=None, help="ANUL per Frame baru (min 1)")
+    ap.add_argument("--interval", type=_angka, default=None, help="detik antar cek polling cadangan (deteksi cepat lewat websocket; polling cuma cadangan kalau WS putus)")
+    ap.add_argument("--heartbeat", type=_angka, default=None, help="detik antar kabar berkala di log (0 = mati)")
     ap.add_argument("--no-ws", action="store_true", default=None, help="matikan websocket, cuma pakai polling")
-    ap.add_argument("--max-buys", type=int, default=None, help="berhenti setelah sekian beli")
-    ap.add_argument("--budget", type=float, default=None, help="total ANUL maksimal yang dibelanjakan")
-    ap.add_argument("--reserve", type=float, default=None, help="berhenti kalau saldo < ini")
-    ap.add_argument("--max-age", type=int, default=None, help="cuma beli Frame umur <= sekian detik")
-    ap.add_argument("--buy-delay", type=float, default=None, help="beli saat Frame berumur sekian detik setelah launch")
-    ap.add_argument("--launch-wait-retry", type=float, default=None, help="jeda detik antar coba ulang saat server bilang launch_wait")
-    ap.add_argument("--auto-sell-delay", type=float, default=None, help="jual otomatis sekian detik setelah beli (0 = mati)")
+    ap.add_argument("--max-buys", type=_bilangan_bulat, default=None, help="berhenti setelah sekian beli")
+    ap.add_argument("--budget", type=_angka, default=None, help="total ANUL maksimal yang dibelanjakan")
+    ap.add_argument("--reserve", type=_angka, default=None, help="berhenti kalau saldo < ini")
+    ap.add_argument("--max-age", type=_bilangan_bulat, default=None, help="cuma beli Frame umur <= sekian detik")
+    ap.add_argument("--buy-delay", type=_angka, default=None, help="beli saat Frame berumur sekian detik setelah launch")
+    ap.add_argument("--launch-wait-retry", type=_angka, default=None, help="jeda detik antar coba ulang saat server bilang launch_wait")
+    ap.add_argument("--auto-sell-delay", type=_angka, default=None, help="jual otomatis sekian detik setelah beli (0 = mati)")
     ap.add_argument("--cookies", default=None, help="file cookie sesi (default ~/.folester_session_cookies.txt; wajib beda tiap akun kalau jalan 2 bot sekaligus)")
     ap.add_argument("--once", action="store_true", default=None, help="cek sekali lalu keluar")
     ap.add_argument("--check-only", action="store_true", default=None, help="cuma login + cek saldo, tanpa beli")
