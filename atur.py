@@ -95,6 +95,15 @@ def main():
     cfg["interval"] = _tanya("Cek Frame baru tiap berapa detik (polling cadangan)", "interval", cfg)
     cfg["max_buys"] = _tanya("Maksimal berapa kali beli", "max_buys", cfg, tipe=int)
     cfg["reserve"] = _tanya("Sisa saldo minimum (ANUL) — berhenti kalau saldo di bawah ini", "reserve", cfg)
+    if cfg["interval"] < 10:
+        print("  Catatan: interval <10 dtk itu polling cadangan — deteksi cepat")
+        print("  sudah lewat websocket, jadi interval kecil cuma boros data")
+        print("  (daftar Frame ~1 MB tiap cek) dan tidak bikin beli lebih cepat.")
+        print("  Disarankan 30 dtk.")
+    if cfg["buy_delay"] < 5:
+        print("  Catatan: server Folester baru membuka trading umur 30 dtk, jadi")
+        print("  beli di bawah itu selalu ditolak launch_wait dulu — bot versi")
+        print("  baru otomatis mencoba lagi umur 30,5 dtk, jadi tetap kebeli.")
     with open(CFG_PATH, "w") as f:
         json.dump(cfg, f, indent=2)
     os.chmod(CFG_PATH, 0o600)

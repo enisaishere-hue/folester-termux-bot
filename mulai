@@ -37,7 +37,19 @@ if [ ! -f config.json ]; then
 fi
 echo "Memulai bot Folester..."
 echo "Mematikan bot lama..."
-pkill -f "python3 bot.py$" 2>/dev/null  # cuma bot utama (tanpa flag); bot akun kedua (mulai2) dibiarkan jalan
+# (1) File PID yang ditulis bot baru (bot.py, per file cookie) — paling tepat.
+if [ -f "$HOME/.folester_session_cookies.txt.pid" ]; then
+  OLDPID=$(cat "$HOME/.folester_session_cookies.txt.pid" 2>/dev/null)
+  if [ -n "$OLDPID" ] && kill -0 "$OLDPID" 2>/dev/null; then kill "$OLDPID" 2>/dev/null; fi
+fi
+# (2) Bot lama yang dijalankan dengan flag --cookies (mulai versi baru
+# menulis flag itu di command line) — pkill pakai nama cookie-nya.
+pkill -f "folester_session_cookies.txt" 2>/dev/null
+# (3) Fallback paling lama: bot yang dijalankan tanpa flag (command line
+# tepat "python3 bot.py"). Pola lama `python3 bot.py$` GAGAL mematikan bot
+# yang dijalankan pakai flag apa pun — itu penyebab dua/ tiga bot jalan
+# bersamaan di wallet yang sama, beli dobel, dan saldo terkuras.
+pkill -f "python3 bot.py$" 2>/dev/null  # bot akun kedua (mulai2) dibiarkan jalan
 sleep 2
 echo "Mengupdate dari GitHub (maks 15 detik)..."
 if command -v timeout >/dev/null 2>&1; then
@@ -46,5 +58,8 @@ else
   git pull -q 2>/dev/null || true
 fi
 echo "Menjalankan bot..."
-nohup python3 bot.py > folester.log 2>&1 &
+# --cookies ditulis eksplisit supaya bot lama bisa dimatikan lagi lewat
+# pkill -f "folester_session_cookies.txt" di atas (dan supaya bot.py bisa
+# menulis file PID-nya di ~/.folester_session_cookies.txt.pid).
+nohup python3 bot.py --cookies ~/.folester_session_cookies.txt > folester.log 2>&1 &
 echo "Bot jalan (PID $!). Cek log: log"

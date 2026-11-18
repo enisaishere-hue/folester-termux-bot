@@ -38,6 +38,56 @@ itu `git pull` yang nunggu jaringan tanpa batas waktu. Versi baru mencetak
 tiap langkah dan `git pull` dibatasi 15 detik: kalau lewat, bot tetap jalan
 pakai versi lokal. Cara lama tetap bisa: `cd ~/folester-termux-bot && ./mulai`.
 
+## Perbaikan 18 Nov 2026 — bot kadang gagal beli
+
+Diagnosis dari screenshot log 18 Nov 21:58 WIB + kode bot:
+
+- **Saldo server sudah −59.514,19 ANUL saat bot itu start** (proses itu beli 0,
+  jadi bukan dia yang menghabiskan). Dengan saldo negatif, bot versi lama
+  langsung **keluar diam-diam** begitu Frame baru pertama muncul (cek
+  reserve gagal → STOP → exit). Itu yang terlihat seperti "kadang tidak
+  bisa membeli". Di jendela screenshot sendiri (14:43–14:58 WIB) tidak ada
+  Frame baru sama sekali — TRUMP adalah Frame terbaru dan umurnya terus
+  bertambah 91 → 953 dtk — jadi beli 0 di situ normal, bukan gagal.
+- **Penyebab saldo bisa negatif / terkuras:** `mulai` lama mematikan bot
+  dengan `pkill -f "python3 bot.py$"` — pola itu **tidak cocok** dengan bot
+  yang dijalankan pakai flag (mis. `python3 bot.py --keypair ...`), jadi bot
+  lama tetap jalan dan dua/tiga bot membeli bersamaan di wallet yang sama,
+  rebutan cookie sesi, dan menguras saldo yang sama.
+
+Yang diperbaiki di versi ini:
+
+1. **STOP jadi JEDA, bukan mati.** Saldo/reserve/budget/max_buys habis →
+   bot tetap memantau, tulis `JEDA BELI: ...` di log, refresh saldo dari
+   server tiap 60 dtk, dan beli jalan lagi sendiri kalau saldo pulih
+   (mis. kamu jual posisi manual). Frame yang muncul saat jeda tetap
+   diantre sampai umurnya lewat max_age.
+2. **Login ulang boleh tiap percobaan trade.** Sebelumnya sesi yang habis
+   kedua kalinya membuat semua beli berikutnya gagal `sign_in_required`
+   selamanya (flag reauth cuma sekali seumur hidup bot).
+3. **Saldo 0 tidak lagi salah dibaca** (bug `or`: 0 dianggap tidak ada).
+   Saldo negatif dari server kini diperingatkan jelas di awal log.
+4. **Satu proses per wallet (file lock).** Bot kedua dengan wallet sama
+   menolak jalan dengan pesan jelas — tidak ada lagi beli dobel.
+5. **`launch_wait` tidak lagi dicoba tiap 0,5 dtk.** Server baru buka
+   trading umur 30 dtk, jadi retry pertama dijadwalkan umur 30,5 dtk —
+   ~60 POST sia-sia per Frame hilang, risiko kena `trade_cooldown` /
+   rate-limit mengecil.
+6. **Gagal beli sesaat (jaringan, 5xx, rate-limit) diantre ulang** sampai
+   umur max_age, bukan dibuang padahal Frame sudah ditandai seen.
+7. **WebSocket timeout 5 → 30 dtk** (di HP/VPN jeda >5 dtk itu biasa;
+   log lama penuh `websocket putus (Errno 103/104)`).
+8. **`mulai`/`mulai2` benar-benar mematikan bot lama** (file PID + nama
+   file cookie + pola lama), dan `mulai` kini menjalankan bot dengan
+   `--cookies` eksplisit supaya bisa dimatikan lagi.
+
+**Kalau saldomu masih negatif / di bawah reserve:** bot versi baru tidak
+akan beli sampai saldo pulih — itu sengaja. Cek dashboard Folester, jual
+posisi manual sampai saldo di atas reserve + amount sekali beli, bot akan
+lanjut sendiri tanpa restart. Kalau saldo negatifnya tidak masuk akal
+(mis. kamu tidak pernah beli sebanyak itu), cek juga `ps` di Termux —
+pastikan cuma satu bot yang jalan: `ps aux | grep bot.py`.
+
 `config.json` berisi pengaturanmu (file keypair, ANUL per beli, delay beli,
 delay jual, dst.) dan tidak ikut ke Git — aman dari `git pull`. Semua nilai
 di `config.json` bisa ditimpa lewat flag kalau mau, mis.

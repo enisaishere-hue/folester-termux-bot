@@ -42,6 +42,34 @@
 #   Bot jalan TERUS (nonstop) sampai batas aman tercapai:
 #   50 kali beli / total 5.000 ANUL / saldo di bawah 100 ANUL.
 #
+# PERBAIKAN 2026-11-18 (gagal beli, dari screenshot log 18 Nov 21:58 WIB):
+#   1. STOP karena saldo/reserve/budget/max_buys TIDAK LAGI mematikan bot:
+#      bot JEDA beli, tetap memantau, refresh saldo tiap 60 dtk, dan lanjut
+#      otomatis kalau saldo pulih (mis. habis jual posisi manual). Sebelumnya
+#      bot keluar diam-diam saat Frame baru pertama muncul sesudah saldo
+#      habis — itu yang terlihat seperti "kadang tidak bisa membeli".
+#   2. Login ulang (reauth) sekarang boleh tiap percobaan trade, bukan cuma
+#      sekali seumur hidup bot: sebelumnya sesi yang habis kedua kalinya
+#      membuat SEMUA beli berikutnya gagal sign_in_required.
+#   3. Saldo 0 dari server tidak lagi salah dibaca (bug `or`: 0 dianggap
+#      tidak ada, lalu dipakai saldo-amount). Saldo negatif dari server
+#      dilaporkan jelas di awal, bukan cuma di heartbeat.
+#   4. Satu proses per wallet (file lock): bot kedua dengan wallet sama
+#      menolak jalan, jadi tidak ada lagi beli dobel / saldo terkuras
+#      bersamaan gara-gara `mulai` gagal mematikan bot lama.
+#   5. launch_wait tidak lagi dicoba tiap 0,5 dtk sejak umur 0,5 dtk
+#      (~60 POST sia-sia): server baru buka trading umur 30 dtk, jadi
+#      retry pertama dijadwalkan umur 30,5 dtk. Lebih hemat request dan
+#      kecil risiko kena trade_cooldown / rate-limit.
+#   6. Gagal beli sesaat (jaringan, 5xx, rate-limit, insufficient_balance)
+#      sekarang diantre ulang sampai umur max_age, bukan dibuang begitu
+#      saja padahal Frame sudah ditandai seen.
+#   7. WebSocket timeout 5 -> 30 dtk: di HP/VPN jeda >5 dtk itu biasa dan
+#      sebelumnya memutus WS berkali-kali (Errno 103/104 di log).
+#   8. buy_delay tidak lagi tidur blokir di loop utama: Frame yang
+#      terdeteksi terlalu dini dijadwalkan ke antrean, deteksi Frame baru
+#      tetap jalan.
+#
 # KUNCI TETAP DI HP KAMU
 #   Script ini membaca file keypair Solana dari HP kamu sendiri dan TIDAK
 #   PERNAH mengirimnya ke mana pun. Dua format diterima:
@@ -121,6 +149,10 @@
 # ============================================================================
 import argparse
 import base64
+try:
+    import fcntl
+except ImportError:  # Termux/Linux selalu ada; jaga-jaga saja
+    fcntl = None
 import gzip
 import hashlib
 import http.client
@@ -667,7 +699,7 @@ def ws_listen(frame_queue, status, stop_event):
             status["last_msg"] = time.monotonic()
             log("websocket live tersambung (deteksi Frame baru <1 dtk)")
             backoff = 1.0
-            ss.settimeout(5)
+            ss.settimeout(30)
             while not stop_event.is_set():
                 text, buf = _ws_recv_text(ss, buf)
                 status["last_msg"] = time.monotonic()
@@ -691,6 +723,50 @@ def ws_listen(frame_queue, status, stop_event):
             backoff = min(backoff * 2, 30)
         finally:
             status["connected"] = False
+
+
+# ---------------------------------------------------------------------------
+# Lock: satu proses bot per wallet (file lock + file PID)
+# Kalau bot lama masih jalan (mis. `mulai` gagal mematikannya karena
+# dijalankan pakai flag), bot baru MENOLAK jalan dan bilang begitu — jadi
+# tidak ada dua bot yang beli dobel, rebutan cookie sesi, dan menguras
+# saldo yang sama sampai negatif. Lock dilepas otomatis kalau proses mati.
+# ---------------------------------------------------------------------------
+_LOCK_FD = None
+
+
+def acquire_lock(wallet):
+    """Kunci bot untuk wallet ini. Kembalikan False kalau bot lain untuk
+    wallet yang sama sudah jalan."""
+    global _LOCK_FD
+    path = os.path.expanduser(f"~/.folester-{wallet[:8]}.lock")
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as e:
+        log(f"lock gagal dibuka {path}: {e} (lanjut tanpa lock)")
+        return True
+    if fcntl is not None:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            print("BERHENTI: bot lain untuk wallet ini SUDAH JALAN.",
+                  file=sys.stderr)
+            print("Matikan dulu bot lamanya, baru jalankan lagi:",
+                  file=sys.stderr)
+            print("  pkill -f bot.py   (lalu cek: ps aux | grep bot.py)",
+                  file=sys.stderr)
+            print("Atau jalankan ulang lewat: mulai   (versi baru mematikan",
+                  file=sys.stderr)
+            print("bot lama dulu lewat file PID + cookie).", file=sys.stderr)
+            return False
+    _LOCK_FD = fd
+    try:
+        with open(COOKIE_FILE + ".pid", "w") as pf:
+            pf.write(str(os.getpid()))
+    except OSError:
+        pass
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -808,6 +884,15 @@ def fetch_frames():
 # Jeda antar trade yang dipaksakan server Folester: 2 detik. Kalau kena
 # trade_cooldown, bot menunggu sedikit lebih lama (2,1 dtk) sebelum coba lagi.
 TRADE_COOLDOWN_RETRY = 2.1
+# Server Folester baru membuka trading 30 dtk setelah Frame dibuat (dari
+# kode situsnya; Opensea ditolak launch_wait bahkan di umur 20 dtk).
+# Retry launch_wait pertama dijadwalkan ke umur ini, bukan tiap 0,5 dtk.
+LAUNCH_OPEN_AGE = 30.0
+# Error trade yang sifatnya sementara: antre ulang, jangan buang Frame-nya.
+RETRYABLE_TRADE_ERRORS = {
+    "rate_limited", "too_many_requests", "server_busy", "try_again_later",
+    "temporarily_unavailable", "insufficient_balance", "frame_not_found",
+}
 # Kalau posisi terkunci semua saat mau auto-sell, coba lagi tiap 5 dtk...
 SELL_LOCK_RETRY = 5.0
 # ...sampai 300 dtk sesudah jadwal jual; kalau tetap gagal, posisi ditahan.
@@ -821,13 +906,59 @@ def _num(v):
         return 0.0
 
 
+def _balance_from_me(me, fallback):
+    """Ambil saldo dari /me. Pakai cek `is not None`, BUKAN `or`: saldo 0
+    itu nilai yang sah — kalau pakai `or`, 0 dianggap tidak ada dan bot
+    memakai saldo lama dikurangi amount (salah, bisa negatif)."""
+    player = (me or {}).get("player") or {}
+    bal = player.get("balance")
+    return float(bal) if bal is not None else fallback
+
+
+def _launch_wait_delay(created, now):
+    """Jeda sampai trading dibuka (umur 30,5 dtk), atau 0,5 dtk kalau
+    umur sudah lewat 30 dtk tapi server masih bilang launch_wait."""
+    age = (now - created).total_seconds()
+    if age < LAUNCH_OPEN_AGE:
+        return LAUNCH_OPEN_AGE - age + 0.5
+    return 0.5
+
+
+def _log_pause(state, reason):
+    """Catat alasan jeda beli, paling sering 60 dtk sekali supaya log
+    tidak banjir — bot tetap hidup dan memantau."""
+    state["paused_reason"] = reason
+    now_t = time.monotonic()
+    if now_t - state.get("last_pause_log", 0) >= 60:
+        state["last_pause_log"] = now_t
+        log(f"JEDA BELI: {reason} — bot tetap memantau, beli lanjut otomatis "
+            f"kalau saldo/batas pulih (ubah di python3 atur.py kalau mau)")
+
+
+def _limits_reason(buys, spent, balance, a):
+    """Alasan kenapa bot belum boleh beli sekarang (None kalau boleh)."""
+    if buys >= a.max_buys:
+        return f"max_buys tercapai ({buys}/{a.max_buys})"
+    if spent + a.amount > a.budget:
+        return f"budget tercapai (terpakai {spent:.0f}/{a.budget:.0f} ANUL)"
+    if balance - a.amount < a.reserve:
+        return (f"saldo {balance:.2f} ANUL di bawah reserve+amount "
+                f"({a.reserve:g}+{a.amount:g}) — jual posisi manual dulu "
+                f"sampai saldo pulih")
+    return None
+
+
 def _do_trade(frame, side, amount, wallet, seed, state):
     """Satu percobaan trade (buy/sell). Kembalikan (status, hasil, lock):
-    'ok' = berhasil; 'launch_wait' / 'trade_cooldown' = coba lagi nanti;
-    'position_locked' = sebagian/seluruh posisi terkunci (lock berisi
-    available_qty dsb.); 'fail' = gagal lain."""
+    'ok' = berhasil; 'launch_wait' / 'trade_cooldown' / 'retryable' = coba
+    lagi nanti; 'position_locked' = sebagian/seluruh posisi terkunci (lock
+    berisi available_qty dsb.); 'fail' = gagal lain (jangan coba lagi)."""
     body = {"frameId": frame["id"], "side": side, "amount": amount}
     tag = side.upper()
+    # Reauth BOLEH tiap percobaan trade (bukan sekali seumur hidup bot):
+    # sesi bisa habis berkali-kali dalam run berjam-jam. Dibatasi 1x per
+    # percobaan oleh loop range(2) di bawah, jadi tidak bisa loop selamanya.
+    reauth_tried = False
     for _attempt in range(2):  # percobaan ke-2 hanya sesudah login ulang
         try:
             r = http_json(f"{BASE}/api/play/trade", method="POST", data=body, use_cookies=True)
@@ -839,13 +970,23 @@ def _do_trade(frame, side, amount, wallet, seed, state):
             if "trade_cooldown" in msg:
                 log(f"{tag} {frame['name']} kena trade_cooldown, coba lagi nanti")
                 return "trade_cooldown", None, None
-            if "sign_in_required" in msg and not state.get("reauth_done"):
+            if "sign_in_required" in msg and not reauth_tried:
                 log("sesi habis, login ulang...")
                 sign_in(wallet, seed)
-                state["reauth_done"] = True
+                reauth_tried = True
                 continue
-            log(f"{tag} {frame['name']} gagal HTTP: {e}")
-            return "fail", None, None
+            # 4xx yang jelas (bukan 429/408) = penolakan permanen server.
+            # Selain itu (jaringan putus, 5xx sesudah 5x retry http_json,
+            # timeout) = sementara, antre ulang saja.
+            if "HTTP 4" in msg and "429" not in msg and "408" not in msg:
+                log(f"{tag} {frame['name']} gagal HTTP: {e}")
+                state["last_buy_error"] = msg[:120]
+                state["last_buy_error_at"] = time.monotonic()
+                return "fail", None, None
+            log(f"{tag} {frame['name']} gagal sesaat ({e}), antre ulang")
+            state["last_buy_error"] = msg[:120]
+            state["last_buy_error_at"] = time.monotonic()
+            return "retryable", None, None
         if isinstance(r, dict) and r.get("error"):
             err = r.get("error")
             if err == "launch_wait":
@@ -856,15 +997,24 @@ def _do_trade(frame, side, amount, wallet, seed, state):
                 return "trade_cooldown", None, None
             if err == "position_locked":
                 return "position_locked", None, r.get("lock") or {}
-            if err == "sign_in_required" and not state.get("reauth_done"):
+            if err == "sign_in_required" and not reauth_tried:
                 log("sesi habis, login ulang...")
                 sign_in(wallet, seed)
-                state["reauth_done"] = True
+                reauth_tried = True
                 continue
+            if err in RETRYABLE_TRADE_ERRORS:
+                log(f"{tag} {frame['name']} ditolak sementara ({err}), antre ulang")
+                state["last_buy_error"] = str(err)[:120]
+                state["last_buy_error_at"] = time.monotonic()
+                return "retryable", None, None
             log(f"{tag} {frame['name']} ditolak: {r}")
+            state["last_buy_error"] = str(r)[:120]
+            state["last_buy_error_at"] = time.monotonic()
             return "fail", None, None
         return "ok", r, None
     log(f"{tag} {frame['name']} gagal: sesi habis sesudah login ulang")
+    state["last_buy_error"] = "sesi habis sesudah login ulang"
+    state["last_buy_error_at"] = time.monotonic()
     return "fail", None, None
 
 
@@ -1003,11 +1153,20 @@ def main():
         print("Jangan kirim key-nya ke siapa pun, termasuk ke saya.", file=sys.stderr)
         return 2
     log(f"wallet={wallet} (alamat saja yang dicatat, keypair tidak pernah dicatat)")
+    if not acquire_lock(wallet):
+        return 2
     sign_in(wallet, seed)
     player = ensure_joined(wallet)
     balance = float(player.get("balance") or 0)
     log(f"pengaturan: amount={a.amount:g} ANUL, beli {a.buy_delay:g} dtk setelah launch, "
-        f"auto-sell {a.auto_sell_delay:g} dtk, interval {a.interval:g} dtk, max {a.max_buys}x, reserve {a.reserve:g}")
+        f"auto-sell {a.auto_sell_delay:g} dtk, interval {a.interval:g} dtk, max {a.max_buys}x, budget {a.budget:g}, reserve {a.reserve:g}")
+    if balance < 0:
+        log(f"PERINGATAN: saldo server NEGATIF ({balance:.2f} ANUL) — bot tidak "
+            f"akan beli sampai saldo pulih di atas reserve. Cek dashboard "
+            f"Folester / jual posisi manual, lalu bot lanjut sendiri.")
+    elif balance - a.amount < a.reserve:
+        log(f"PERINGATAN: saldo {balance:.2f} ANUL di bawah reserve+amount — "
+            f"bot memantau dulu, beli jalan otomatis kalau saldo pulih.")
     if a.check_only:
         log("check-only selesai, tidak ada pembelian")
         return 0
@@ -1016,7 +1175,9 @@ def main():
     pending = {}  # frame_id -> {frame, created, next_try}: antre retry launch_wait
     pending_sells = {}  # frame_id -> {frame, amount, next_try, deadline}: antre auto-sell
     spent, buys = 0.0, 0
-    state = {"reauth_done": False}
+    state = {"reauth_done": False, "last_pause_log": 0.0,
+             "paused_reason": "", "last_buy_error": "",
+             "last_buy_error_at": 0.0}
     first = True
     polls = 0
     last_beat = time.monotonic()
@@ -1034,6 +1195,8 @@ def main():
     def _retry_delay(status):
         if status == "trade_cooldown":
             return TRADE_COOLDOWN_RETRY
+        if status == "retryable":
+            return 2.0
         return a.launch_wait_retry
 
     def schedule_sell(f, buy_result):
@@ -1055,13 +1218,24 @@ def main():
         nonlocal buys, spent, balance
         buys += 1
         spent += a.amount
-        balance = float(get_me(wallet).get("player", {}).get("balance") or balance - a.amount)
+        state["paused_reason"] = ""
+        try:
+            balance = _balance_from_me(get_me(wallet), balance - a.amount)
+        except Exception as e:
+            # Saldo gagal dibaca sesudah beli JANGAN mematikan bot: pakai
+            # perkiraan (saldo lama - amount), refresh berikutnya (tiap
+            # 60 dtk) akan meluruskan lagi dari server.
+            log(f"saldo gagal diperbarui sesudah BUY {f['name']}: {e} "
+                f"(pakai perkiraan {balance - a.amount:.2f})")
+            balance -= a.amount
         schedule_sell(f, r)
 
     def process_frame(f, now, is_live=False):
         """Satu Frame kandidat -> beli kalau lolos semua syarat.
         Dipakai jalur websocket (live) dan polling (cadangan) dengan aturan
-        yang sama persis. Kembalikan True kalau bot harus STOP."""
+        yang sama persis. TIDAK PERNAH mematikan bot: kalau belum boleh
+        beli (saldo/reserve/budget/max_buys, terlalu dini, launch_wait),
+        Frame dijadwalkan ulang ke antrean dan bot tetap memantau."""
         nonlocal buys, spent, balance, latest_ts, latest_name
         ts = f.get("created_at") or ""
         if ts > latest_ts:
@@ -1081,37 +1255,50 @@ def main():
             return False
         if age < 0:
             age = 0  # jam HP sedikit tertinggal dari server, anggap baru lahir
-        # Target: beli tepat BUY_DELAY detik setelah launch. Kalau Frame
-        # terdeteksi lebih cepat (mis. lewat websocket), tunggu dulu sampai
-        # umurnya mencapai target; kalau sudah lebih tua, beli langsung.
+        # Terlalu dini (umur < buy_delay): JADWALKAN, jangan tidur blokir
+        # di loop utama — tidur di sini dulu menghentikan deteksi Frame
+        # baru, retry, dan auto-sell selama buy_delay.
         if age < a.buy_delay:
-            time.sleep(a.buy_delay - age)
-            age = (datetime.now(timezone.utc) - created).total_seconds()
-        # balance adalah saldo LIVE (diperbarui dari server tiap selesai beli),
-        # jadi cadangan dicek dari saldo setelah beli ini, bukan saldo dikurangi
-        # spent (itu menghitung dobel dan membuat bot berhenti terlalu cepat).
-        if buys >= a.max_buys or spent + a.amount > a.budget or balance - a.amount < a.reserve:
-            log(f"STOP: buys={buys} spent={spent:.2f} saldo~{balance:.2f}")
-            return True
+            pending[f["id"]] = {"frame": f, "created": created,
+                                "next_try": time.monotonic() + (a.buy_delay - age)}
+            return False
+        # Belum boleh beli (saldo/reserve/budget/max_buys): JEDA, bukan
+        # STOP. Frame dijadwalkan ulang tiap 10 dtk sampai umurnya lewat
+        # max_age — kalau saldo pulih (mis. Berly jual posisi manual),
+        # beli jalan sendiri tanpa restart bot.
+        reason = _limits_reason(buys, spent, balance, a)
+        if reason:
+            _log_pause(state, reason)
+            pending[f["id"]] = {"frame": f, "created": created,
+                                "next_try": time.monotonic() + 10}
+            return False
         src = "WS" if is_live else "poll"
         log(f"FRAME BARU {f['name']} umur={age:.1f} dtk harga={f['price']:.6f} ANUL trades={f.get('trades', 0)} [{src}]")
         status, r = buy(f, a.amount, wallet, seed, state)
         if status == "ok":
             on_buy_success(f, r)
-        elif status in ("launch_wait", "trade_cooldown"):
-            # Server belum membuka trading untuk Frame ini (launch_wait) atau
-            # kena jeda antar trade (trade_cooldown). Jangan anggap gagal:
-            # antrekan ulang sampai umurnya melewati max_age. Antrean ini
-            # dicek tiap putaran loop tanpa menghentikan deteksi Frame baru.
-            delay = _retry_delay(status)
+        elif status in ("launch_wait", "trade_cooldown", "retryable"):
+            # Server belum membuka trading (launch_wait) / kena jeda antar
+            # trade / gagal sesaat: antrekan ulang sampai umurnya melewati
+            # max_age. launch_wait dijadwalkan ke umur 30,5 dtk (saat
+            # trading dibuka), bukan tiap 0,5 dtk sejak umur 0,5 dtk.
+            if status == "launch_wait":
+                delay = _launch_wait_delay(created, now)
+            else:
+                delay = _retry_delay(status)
             pending[f["id"]] = {"frame": f, "created": created,
                                 "next_try": time.monotonic() + delay}
             log(f"antre retry {f['name']} ({status}), coba lagi {delay:g} dtk lagi")
+        else:
+            # 'fail' = penolakan permanen server untuk Frame ini; sudah
+            # dicatat lengkap di _do_trade, Frame tidak dicoba lagi.
+            pass
         return False
 
     def retry_pending(now):
-        """Coba lagi Frame yang antre karena launch_wait. Kembalikan True
-        kalau bot harus STOP."""
+        """Coba lagi Frame yang antre (terlalu dini / launch_wait /
+        cooldown / gagal sesaat / jeda saldo). TIDAK PERNAH mematikan bot:
+        kalau batas belum pulih, antrean ditunda 10 dtk dan dicek lagi."""
         nonlocal buys, spent, balance
         for fid in list(pending.keys()):
             p = pending[fid]
@@ -1122,16 +1309,22 @@ def main():
                 log(f"STOP retry {p['frame']['name']}: umur {age:.0f} dtk > max_age {a.max_age}")
                 del pending[fid]
                 continue
-            if buys >= a.max_buys or spent + a.amount > a.budget or balance - a.amount < a.reserve:
-                log(f"STOP: buys={buys} spent={spent:.2f} saldo~{balance:.2f}")
-                return True
+            reason = _limits_reason(buys, spent, balance, a)
+            if reason:
+                _log_pause(state, reason)
+                p["next_try"] = time.monotonic() + 10
+                continue
             log(f"retry BUY {p['frame']['name']} (umur {age:.0f} dtk)")
             status, r = buy(p["frame"], a.amount, wallet, seed, state)
             if status == "ok":
                 on_buy_success(p["frame"], r)
                 del pending[fid]
-            elif status in ("launch_wait", "trade_cooldown"):
-                p["next_try"] = time.monotonic() + _retry_delay(status)
+            elif status in ("launch_wait", "trade_cooldown", "retryable"):
+                if status == "launch_wait":
+                    delay = _launch_wait_delay(p["created"], now)
+                else:
+                    delay = _retry_delay(status)
+                p["next_try"] = time.monotonic() + delay
             else:
                 del pending[fid]
         return False
@@ -1151,11 +1344,11 @@ def main():
             if status == "ok":
                 spent = max(0.0, spent - (_num(r.get("quote")) - _num(r.get("fee"))))
                 try:
-                    balance = float(get_me(wallet).get("player", {}).get("balance") or balance)
+                    balance = _balance_from_me(get_me(wallet), balance)
                 except Exception as e:
                     log(f"saldo gagal diperbarui sesudah sell: {e}")
                 del pending_sells[fid]
-            elif status in ("launch_wait", "trade_cooldown"):
+            elif status in ("launch_wait", "trade_cooldown", "retryable"):
                 s["next_try"] = time.monotonic() + _retry_delay(status)
             elif status == "position_locked":
                 avail = _num((lock or {}).get("available_qty"))
@@ -1173,7 +1366,17 @@ def main():
                 del pending_sells[fid]
 
     last_poll = 0.0
+    last_balance_refresh = time.monotonic()
     while True:
+        # Refresh saldo tiap 60 dtk dari server (request kecil, bukan daftar
+        # Frame 1 MB): saldo di heartbeat tidak lagi basi berjam-jam, dan
+        # jeda karena saldo habis bisa pulih sendiri tanpa restart.
+        if time.monotonic() - last_balance_refresh >= 60:
+            last_balance_refresh = time.monotonic()
+            try:
+                balance = _balance_from_me(get_me(wallet), balance)
+            except Exception as e:
+                log(f"refresh saldo gagal: {e} (pakai saldo terakhir {balance:.2f})")
         if a.heartbeat > 0 and time.monotonic() - last_beat >= a.heartbeat:
             try:
                 age = (datetime.now(timezone.utc) - datetime.fromisoformat(latest_ts.replace("Z", "+00:00"))).total_seconds()
@@ -1183,7 +1386,12 @@ def main():
             ws_bit = ""
             if ws_thread is not None:
                 ws_bit = " | ws: OK" if ws_status["connected"] else " | ws: PUTUS"
-            log(f"memantau... cek ke-{polls} | Frame terbaru: {latest_name} ({age_s}) | beli: {buys} | saldo: ~{balance:.2f} ANUL{ws_bit}")
+            extra = ""
+            if state.get("paused_reason"):
+                extra += f" | JEDA: {state['paused_reason']}"
+            if state.get("last_buy_error") and time.monotonic() - state.get("last_buy_error_at", 0) < 300:
+                extra += f" | gagal terakhir: {state['last_buy_error'][:60]}"
+            log(f"memantau... cek ke-{polls} | Frame terbaru: {latest_name} ({age_s}) | beli: {buys} | saldo: ~{balance:.2f} ANUL{ws_bit}{extra}")
             last_beat = time.monotonic()
         # 1. Jalur websocket: Frame yang masuk live diproses dulu (paling cepat).
         # Loop ini bangun tiap 0.2 dtk supaya antrean WS langsung diproses,
@@ -1217,6 +1425,16 @@ def main():
             else:
                 polls += 1
                 now = datetime.now(timezone.utc)
+                # Frame WS yang masuk selama fetch polling (1 MB, 2-3 dtk)
+                # diproses dulu — jangan tunggu putaran loop berikut.
+                while True:
+                    try:
+                        f = ws_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    if process_frame(f, now, is_live=True):
+                        ws_stop.set()
+                        return 0
                 for f in frames:
                     if process_frame(f, now):
                         ws_stop.set()
