@@ -11,10 +11,14 @@
 # kalau "Permission denied", jalankan dulu chmod +x mulai mulai2)
 # Kalau belum ada config.json, jalankan dulu: python3 atur.py
 #
-# Kenapa dulu kadang kelihatan stuck: script lama diam saja saat `git pull`
-# (tanpa pesan, tanpa batas waktu), jadi kalau jaringan lambat/putus dia
-# nunggu tanpa batas dan layar kosong. Versi ini mencetak tiap langkah dan
-# `git pull` dibatasi 15 detik — kalau lewat, lanjut pakai versi lokal.
+# Kenapa dulu kadang kelihatan stuck: `git pull` nunggu jaringan tanpa batas
+# waktu kalau perintah `timeout` tidak terpasang di Termux (cabang else lama
+# menjalankan `git pull` polos tanpa batas apa pun), dan selama 15 detik itu
+# layar diam tanpa tanda apa-apa — jadi wajar kalau dikira macet lalu
+# di-Ctrl+C sebelum PID sempat muncul. Versi ini: `git pull` dijalankan di
+# background dengan titik kemajuan tiap detik dan batas keras 10 detik
+# (murni shell, tidak butuh `timeout`), plus pesan di awal supaya jelas
+# berapa lama menunggunya. Total `mulai` paling lama ~12 detik.
 
 # Cari folder repo yang benar, walau dipanggil lewat symlink di ~/bin.
 # `readlink -f` mengikuti symlink sampai ke file aslinya.
@@ -35,7 +39,7 @@ if [ ! -f config.json ]; then
   echo "Belum ada config.json — jalankan dulu: python3 atur.py"
   exit 1
 fi
-echo "Memulai bot Folester..."
+echo "Memulai bot Folester... (tunggu sampai muncul PID, sekitar 5-15 detik — jangan Ctrl+C)"
 echo "Mematikan bot lama..."
 # (1) File PID yang ditulis bot baru (bot.py, per file cookie) — paling tepat.
 if [ -f "$HOME/.folester_session_cookies.txt.pid" ]; then
@@ -50,12 +54,35 @@ pkill -f "folester_session_cookies.txt" 2>/dev/null
 # yang dijalankan pakai flag apa pun — itu penyebab dua/ tiga bot jalan
 # bersamaan di wallet yang sama, beli dobel, dan saldo terkuras.
 pkill -f "python3 bot.py$" 2>/dev/null  # bot akun kedua (mulai2) dibiarkan jalan
-sleep 2
-echo "Mengupdate dari GitHub (maks 15 detik)..."
-if command -v timeout >/dev/null 2>&1; then
-  timeout 15 git pull -q 2>/dev/null || echo "  (update dilewati: jaringan lambat / git pull >15 dtk — lanjut pakai versi lokal)"
+echo "  bot lama dimatikan."
+sleep 1
+echo "Mengupdate dari GitHub (maks 10 detik — titik-titik di bawah tandanya masih jalan)..."
+# `git pull` di background + titik kemajuan tiap detik + batas keras 10 dtk.
+# Sengaja murni shell: tidak butuh perintah `timeout` (belum tentu ada di
+# Termux — cabang else lama justru menjalankan `git pull` polos tanpa batas,
+# itu yang bikin layar diam selamanya saat jaringan lambat).
+# `git pull` itu satu proses (yang nyangkut di jaringan ya proses git-nya
+# sendiri), jadi `kill PID` langsung mematikannya — tidak perlu `set -m`
+# (job control justru error "can't access tty" kalau stdin bukan terminal).
+# GIT_TERMINAL_PROMPT=0 supaya git tidak pernah berhenti menunggu input
+# username/password di layar (satu lagi penyebab kelihatan stuck).
+GIT_TERMINAL_PROMPT=0 git pull -q 2>/dev/null &
+_GP=$!
+_i=0
+while kill -0 "$_GP" 2>/dev/null && [ "$_i" -lt 10 ]; do
+  sleep 1
+  _i=$((_i+1))
+  printf "."
+done
+echo
+if kill -0 "$_GP" 2>/dev/null; then
+  kill "$_GP" 2>/dev/null
+  wait "$_GP" 2>/dev/null
+  echo "  (update dilewati: git pull >10 dtk — lanjut pakai versi lokal)"
+elif wait "$_GP" 2>/dev/null; then
+  echo "  (update selesai)"
 else
-  git pull -q 2>/dev/null || true
+  echo "  (update gagal — lanjut pakai versi lokal)"
 fi
 echo "Menjalankan bot..."
 # --cookies ditulis eksplisit supaya bot lama bisa dimatikan lagi lewat

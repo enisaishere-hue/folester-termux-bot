@@ -6,8 +6,9 @@
 #   cd ~/folester-termux-bot && sh pasang
 # (lihat `mulai` untuk alasannya: symlink langsung gagal karena file repo
 # tidak punya izin eksekusi.)
-# Sama seperti `mulai`: mencetak tiap langkah dan `git pull` dibatasi
-# 15 detik supaya tidak kelihatan stuck saat jaringan lambat.
+# Sama seperti `mulai`: mencetak tiap langkah dan `git pull` di background
+# dengan titik kemajuan + batas keras 10 detik (murni shell, tanpa `timeout`),
+# supaya tidak kelihatan stuck saat jaringan lambat.
 
 SCRIPT="$0"
 if command -v readlink >/dev/null 2>&1; then
@@ -20,7 +21,7 @@ if [ ! -f "$DIR/config.json" ] && [ -f "$HOME/folester-termux-bot/config.json" ]
   DIR="$HOME/folester-termux-bot"
 fi
 cd "$DIR" || exit 1
-echo "Memulai bot akun kedua..."
+echo "Memulai bot akun kedua... (tunggu sampai muncul PID, sekitar 5-15 detik — jangan Ctrl+C)"
 echo "Mematikan bot akun kedua yang lama..."
 # (1) File PID bot baru (per file cookie) — paling tepat.
 if [ -f "$HOME/.folester_session_cookies-akg8.txt.pid" ]; then
@@ -30,12 +31,26 @@ fi
 # (2) Bot lama dengan flag --cookies akg8 / --keypair bacj-key.txt.
 pkill -f "folester_session_cookies-akg8" 2>/dev/null
 pkill -f "bacj-key.txt" 2>/dev/null
-sleep 2
-echo "Mengupdate dari GitHub (maks 15 detik)..."
-if command -v timeout >/dev/null 2>&1; then
-  timeout 15 git pull -q 2>/dev/null || echo "  (update dilewati: jaringan lambat / git pull >15 dtk — lanjut pakai versi lokal)"
+echo "  bot lama dimatikan."
+sleep 1
+echo "Mengupdate dari GitHub (maks 10 detik — titik-titik di bawah tandanya masih jalan)..."
+GIT_TERMINAL_PROMPT=0 git pull -q 2>/dev/null &
+_GP=$!
+_i=0
+while kill -0 "$_GP" 2>/dev/null && [ "$_i" -lt 10 ]; do
+  sleep 1
+  _i=$((_i+1))
+  printf "."
+done
+echo
+if kill -0 "$_GP" 2>/dev/null; then
+  kill "$_GP" 2>/dev/null
+  wait "$_GP" 2>/dev/null
+  echo "  (update dilewati: git pull >10 dtk — lanjut pakai versi lokal)"
+elif wait "$_GP" 2>/dev/null; then
+  echo "  (update selesai)"
 else
-  git pull -q 2>/dev/null || true
+  echo "  (update gagal — lanjut pakai versi lokal)"
 fi
 echo "Menjalankan bot akun kedua..."
 nohup python3 bot.py --keypair ~/bacj-key.txt --cookies ~/.folester_session_cookies-akg8.txt > folester-akg8.log 2>&1 &

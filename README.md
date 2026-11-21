@@ -33,10 +33,13 @@ dengan "Permission denied" — itu yang terjadi kalau `git pull` menampilkan
 cepatnya: `chmod +x ~/folester-termux-bot/mulai ~/folester-termux-bot/mulai2`,
 lalu jalankan `sh pasang` supaya tidak terulang di `git pull` berikutnya.
 
-Kalau lagi stuck di layar `./mulai` yang kosong, tekan `Ctrl+C` dulu —
-itu `git pull` yang nunggu jaringan tanpa batas waktu. Versi baru mencetak
-tiap langkah dan `git pull` dibatasi 15 detik: kalau lewat, bot tetap jalan
-pakai versi lokal. Cara lama tetap bisa: `cd ~/folester-termux-bot && ./mulai`.
+Kalau `mulai` kelihatan diam, jangan langsung `Ctrl+C` — tunggu sampai
+muncul `Bot jalan (PID ...)`, paling lama ~12 detik. `git pull`-nya jalan
+di background dengan titik kemajuan tiap detik dan batas keras 10 detik
+(murni shell, tidak butuh perintah `timeout`): kalau lewat, bot tetap jalan
+pakai versi lokal. Penyebab stuck lama: `git pull` tanpa `timeout` yang
+terpasang di Termux jalan tanpa batas waktu sama sekali. Cara lama tetap
+bisa: `cd ~/folester-termux-bot && ./mulai`.
 
 ## Perbaikan 18 Nov 2026 — bot kadang gagal beli
 
