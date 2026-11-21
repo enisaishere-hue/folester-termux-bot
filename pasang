@@ -11,11 +11,23 @@
 # lagi ("mode change 100755 => 100644"). Symlink ke file tanpa +x ikut
 # gagal ("Permission denied"). Wrapper di ~/bin ini dibuat di HP sendiri
 # dan diberi +x di sini, isinya cuma `sh .../mulai` — jadi `git pull`
-# berikutnya tidak bisa merusaknya lagi. `pasang` juga memberi +x pada
-# file repo supaya `./mulai` bisa dipakai sampai `git pull` berikutnya
-# menyentuhnya lagi; kalau itu terjadi, jalankan `sh pasang` ulang.
+# berikutnya tidak bisa merusaknya lagi.
+#
+# PENTING: `pasang` TIDAK memberi +x pada file repo. Dulu `pasang` melakukan
+# itu supaya `./mulai` bisa dipakai — tapi `chmod +x` itu justru MENGOTORI
+# repo (mode lokal 100755 vs repo 100644), sehingga `git pull` berikutnya
+# selalu gagal "Your local changes to mulai/mulai2 would be overwritten"
+# dan harus `git checkout --` dulu. Lingkaran itu yang terjadi 21 Nov.
+# Wrapper tidak butuh +x pada file repo (dijalankan lewat `sh`), jadi
+# biarkan file repo tetap 100644 — `git pull` jadi selalu bersih.
+# Kalau mau `./mulai` langsung, jalankan `sh mulai` saja.
 set -e
 REPO="$HOME/folester-termux-bot"
+# Bersihkan perubahan mode lokal yang ditinggal `pasang` versi lama
+# (chmod +x pada mulai/mulai2) supaya `git pull` berikutnya tidak Aborting.
+# Ini hanya mengembalikan dua file peluncur ke versi repo — jangan edit
+# mulai/mulai2 langsung di HP, semua perubahan lewat GitHub.
+git -C "$REPO" checkout -- mulai mulai2 2>/dev/null || true
 mkdir -p "$HOME/bin"
 cat > "$HOME/bin/mulai" <<'EOF'
 #!/bin/sh
@@ -26,7 +38,6 @@ cat > "$HOME/bin/mulai2" <<'EOF'
 exec sh "$HOME/folester-termux-bot/mulai2" "$@"
 EOF
 chmod +x "$HOME/bin/mulai" "$HOME/bin/mulai2"
-chmod +x "$REPO/mulai" "$REPO/mulai2" 2>/dev/null || true
 if ! grep -qs 'HOME/bin' "$HOME/.bashrc"; then
   echo 'export PATH="$HOME/bin:$PATH"' >> "$HOME/.bashrc"
   echo "PATH ditambahkan ke ~/.bashrc"

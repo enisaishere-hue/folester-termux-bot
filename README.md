@@ -28,10 +28,14 @@ mulai
 `sh`, jadi tidak tergantung izin eksekusi file di repo. Jangan pasang
 dengan symlink (`ln -sf .../mulai ~/bin/mulai`): file `mulai` di repo
 tidak punya izin eksekusi (mode 100644), jadi symlink-nya ikut gagal
-dengan "Permission denied" — itu yang terjadi kalau `git pull` menampilkan
-`mode change 100755 => 100644 mulai`. Kalau `mulai` gagal begitu, perbaikan
-cepatnya: `chmod +x ~/folester-termux-bot/mulai ~/folester-termux-bot/mulai2`,
-lalu jalankan `sh pasang` supaya tidak terulang di `git pull` berikutnya.
+dengan "Permission denied". `pasang` juga TIDAK memberi +x pada file repo
+— dulu itu dilakukan supaya `./mulai` bisa dipakai, tapi `chmod +x` itu
+mengotori repo sehingga `git pull` berikutnya selalu gagal "Your local
+changes to mulai/mulai2 would be overwritten" (lingkaran yang terjadi
+21 Nov). Kalau `git pull` gagal begitu, perbaikannya: `git checkout --
+mulai mulai2` lalu `git pull` lagi, atau jalankan `sh pasang` (versi baru
+membersihkan perubahan mode itu sendiri). `./mulai` langsung tetap akan
+"Permission denied" — pakai `mulai` (wrapper) atau `sh mulai`.
 
 Kalau `mulai` kelihatan diam, jangan langsung `Ctrl+C` — tunggu sampai
 muncul `Bot jalan (PID ...)`, paling lama ~12 detik. `git pull`-nya jalan
