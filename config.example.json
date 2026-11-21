@@ -1,1 +1,1 @@
-{"amount": 100, "auto_sell_delay": 0, "buy_delay": 0.5, "interval": 30, "keypair": "~/bacj-key.txt", "max_buys": 50, "reserve": 100, "budget": 5000}
+{"amount": 100, "auto_sell_delay": 0, "buy_delay": 0.5, "interval": 30, "keypair": "~/bacj-key.txt", "max_buys": 50, "reserve": 100}

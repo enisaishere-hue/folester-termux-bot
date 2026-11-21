@@ -128,7 +128,8 @@
 #   --interval 30    = cek daftar Frame tiap 30 detik (jalur polling cadangan)
 #   --no-ws          = matikan websocket, cuma pakai polling (kalau WS bermasalah)
 #   --max-buys 50    = berhenti setelah 50 kali beli
-#   --budget 5000    = berhenti setelah total belanja 5.000 ANUL
+#   --budget 1000000000 = batas total belanja (default praktis tanpa batas;
+#       atur.py tidak lagi menanyakan budget sejak 22 Nov 2026)
 #   --reserve 100    = berhenti kalau saldo ANUL di bawah 100
 #   --max-age 120    = cuma beli Frame yang umurnya <=120 detik saat ketemu
 #   --buy-delay 0.5  = beli saat Frame berumur 0,5 detik setelah launch
@@ -1053,7 +1054,7 @@ DEFAULTS = {
     "heartbeat": 3.0,
     "no_ws": False,
     "max_buys": 50,
-    "budget": 5000.0,
+    "budget": 1000000000.0,
     "reserve": 100.0,
     "max_age": 120,
     "buy_delay": 0.5,

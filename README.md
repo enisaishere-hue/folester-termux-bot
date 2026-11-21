@@ -221,7 +221,8 @@ pkill -f bot.py
 ```
 
 Opsi lain: `--amount 100` (ANUL per Frame), `--interval 30` (detik antar cek
-polling cadangan), `--no-ws` (matikan websocket), `--max-buys 50`, `--budget 5000`,
+polling cadangan), `--no-ws` (matikan websocket), `--max-buys 50`, `--budget
+1000000000` (default; atur.py tidak lagi menanyakan budget sejak 22 Nov 2026),
 `--reserve 100`, `--max-age 120`, `--buy-delay 0.5` (beli saat Frame berumur
 0,5 detik setelah launch), `--launch-wait-retry 0.5` (jeda detik antar coba ulang
 saat server bilang `launch_wait`), `--auto-sell-delay 0` (jual otomatis mati;
