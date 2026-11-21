@@ -1392,7 +1392,7 @@ def main():
                 extra += f" | JEDA: {state['paused_reason']}"
             if state.get("last_buy_error") and time.monotonic() - state.get("last_buy_error_at", 0) < 300:
                 extra += f" | gagal terakhir: {state['last_buy_error'][:60]}"
-            log(f"memantau... cek ke-{polls} | Frame terbaru: {latest_name} ({age_s}) | beli: {buys} | saldo: ~{balance:.2f} ANUL{ws_bit}{extra}")
+            log(f"memantau... cek ke-{polls} | Frame terbaru: {latest_name} ({age_s}) | beli: {buys} | saldo: {balance:.2f} ANUL (perkiraan){ws_bit}{extra}")
             last_beat = time.monotonic()
         # 1. Jalur websocket: Frame yang masuk live diproses dulu (paling cepat).
         # Loop ini bangun tiap 0.2 dtk supaya antrean WS langsung diproses,
