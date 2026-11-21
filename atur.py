@@ -18,6 +18,7 @@ DEFAULTS = {
     "auto_sell_delay": 0,
     "interval": 30,
     "max_buys": 50,
+    "budget": 5000,
     "reserve": 100,
 }
 
@@ -94,6 +95,7 @@ def main():
     cfg["auto_sell_delay"] = _tanya("Jual otomatis berapa detik setelah beli (0 = mati)", "auto_sell_delay", cfg)
     cfg["interval"] = _tanya("Cek Frame baru tiap berapa detik (polling cadangan)", "interval", cfg)
     cfg["max_buys"] = _tanya("Maksimal berapa kali beli", "max_buys", cfg, tipe=int)
+    cfg["budget"] = _tanya("Total maksimal belanja (budget, ANUL) — berhenti/JEDA kalau terpakai habis", "budget", cfg)
     cfg["reserve"] = _tanya("Sisa saldo minimum (ANUL) — berhenti kalau saldo di bawah ini", "reserve", cfg)
     if cfg["interval"] < 10:
         print("  Catatan: interval <10 dtk itu polling cadangan — deteksi cepat")
