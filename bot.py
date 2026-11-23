@@ -889,6 +889,15 @@ TRADE_COOLDOWN_RETRY = 2.1
 # kode situsnya; Opensea ditolak launch_wait bahkan di umur 20 dtk).
 # Retry launch_wait pertama dijadwalkan ke umur ini, bukan tiap 0,5 dtk.
 LAUNCH_OPEN_AGE = 30.0
+# SPEED PATCH 23 Nov 2026 (Berly: "secepat kilat"): jendela balapan yang
+# sebenarnya adalah umur 30-35 dtk, BUKAN sejak launch. Spam tiap 0,001 dtk
+# mustahil (1 request HTTP saja 50-200+ ms, server cooldown 2 dtk, dan
+# 1000 req/dtk = rate-limit + risiko ban Terms §11). Jadi: coba pertama
+# TEPAT umur 30,0 dtk, lalu burst retry tiap 0,2 dtk sampai umur 35 dtk,
+# baru melambat ke 0,5 dtk. Itu ~26 percobaan di jendela buka, vs 1x di
+# versi lama (30,5 dtk sekali).
+OPEN_BURST_END = 35.0
+OPEN_BURST_RETRY = 0.2
 # Error trade yang sifatnya sementara: antre ulang, jangan buang Frame-nya.
 RETRYABLE_TRADE_ERRORS = {
     "rate_limited", "too_many_requests", "server_busy", "try_again_later",
@@ -917,11 +926,14 @@ def _balance_from_me(me, fallback):
 
 
 def _launch_wait_delay(created, now):
-    """Jeda sampai trading dibuka (umur 30,5 dtk), atau 0,5 dtk kalau
-    umur sudah lewat 30 dtk tapi server masih bilang launch_wait."""
+    """Jeda sampai trading dibuka (umur 30,0 dtk tepat), lalu burst
+    0,2 dtk selama jendela buka (umur 30-35 dtk), baru 0,5 dtk sesudahnya.
+    Jam HP vs server bisa meleset sedikit — burst 0,2 dtk menutup itu."""
     age = (now - created).total_seconds()
     if age < LAUNCH_OPEN_AGE:
-        return LAUNCH_OPEN_AGE - age + 0.5
+        return max(0.0, LAUNCH_OPEN_AGE - age)
+    if age < OPEN_BURST_END:
+        return OPEN_BURST_RETRY
     return 0.5
 
 
@@ -1412,8 +1424,9 @@ def main():
             log(f"memantau... cek ke-{polls} | Frame terbaru: {latest_name} ({age_s}) | beli: {buys} | saldo: {balance:.2f} ANUL (perkiraan){ws_bit}{extra}")
             last_beat = time.monotonic()
         # 1. Jalur websocket: Frame yang masuk live diproses dulu (paling cepat).
-        # Loop ini bangun tiap 0.2 dtk supaya antrean WS langsung diproses,
-        # tidak menunggu polling 30 detik.
+        # Loop ini bangun tiap 0.05 dtk supaya antrean WS langsung diproses,
+        # tidak menunggu polling 30 detik. (SPEED PATCH: 0.2 -> 0.05 dtk,
+        # supaya retry umur 30,0 dtk tidak telat sampai 0,2 dtk.)
         now = datetime.now(timezone.utc)
         while True:
             try:
@@ -1430,8 +1443,12 @@ def main():
         # 3. Auto-sell posisi yang sudah waktunya.
         process_sells()
         # 4. Jalur polling cadangan tiap a.interval detik: daftar lengkap,
-        # kalau WS ketinggalan.
-        if time.monotonic() - last_poll >= a.interval:
+        # kalau WS ketinggalan. DITUNDA kalau ada retry yang jatuh tempo
+        # <3 dtk lagi — fetch polling 1 MB / 2-3 dtk akan memblokir retry
+        # di jendela buka 30 dtk dan bikin bot kalah balapan.
+        _retry_soon = any(
+            p["next_try"] - time.monotonic() < 3.0 for p in pending.values())
+        if time.monotonic() - last_poll >= a.interval and not _retry_soon:
             last_poll = time.monotonic()
             try:
                 frames = fetch_frames()
@@ -1462,7 +1479,7 @@ def main():
                 log(f"once selesai: buys={buys} spent={spent:.2f}")
                 ws_stop.set()
                 return 0
-        time.sleep(0.2)
+        time.sleep(0.05)
 
 
 if __name__ == "__main__":
