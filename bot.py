@@ -370,15 +370,54 @@ def _write_cookies(cookies):
         pass
 
 
+# KEEP-ALIVE PATCH 23 Nov 2026 (Berly: "buatkan keep-alive patch"):
+# Versi lama membuka TCP + TLS baru di SETIAP request lalu menutupnya —
+# tiap retry beli di jendela 30-35 dtk membayar handshake TLS lagi
+# (~100 ms+ di HP). Sekarang satu koneksi HTTPS dipakai ulang untuk
+# semua request ke host yang sama. Kalau server sudah menutup koneksi
+# yang menganggur (idle), percobaan pertama gagal lalu otomatis
+# disambung ulang sekali dengan koneksi baru di dalam panggilan yang
+# sama — paling buruk sama cepatnya dengan versi lama, tidak lebih
+# lambat. Koneksi TIDAK dipakai ulang kalau server bilang Connection:
+# close. Hanya dipakai dari thread utama (WS punya soket sendiri).
+_KA_CONN = {}  # (host, port) -> HTTPSConnection yang masih hidup
+_KA_LOCK = threading.Lock()
+_KA_STATS = {"fresh": 0, "reused": 0, "reconnect": 0}
+
+
+def _ka_drop(host, port):
+    """Buang koneksi keep-alive yang sudah mati / ditutup server."""
+    conn = _KA_CONN.pop((host, port), None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _ka_fresh_conn(host, port):
+    """Buka koneksi HTTPS baru dan simpan untuk dipakai ulang."""
+    raw = _raw_connect(host, port)
+    ctx = ssl.create_default_context()
+    ss = ctx.wrap_socket(raw, server_hostname=host)
+    ss.settimeout(20)
+    conn = http.client.HTTPSConnection(host, port, timeout=20)
+    conn.sock = ss
+    _KA_CONN[(host, port)] = conn
+    _KA_STATS["fresh"] += 1
+    return conn
+
+
 def _py_json(url, method="GET", data=None, use_cookies=False):
-    """Satu request JSON lewat http.client (Python murni)."""
+    """Satu request JSON lewat http.client (Python murni), koneksi
+    keep-alive dipakai ulang kalau masih hidup."""
     u = urlparse(url)
     host, port = u.hostname, u.port or 443
     path = u.path or "/"
     if u.query:
         path += "?" + u.query
     headers = {"User-Agent": UA, "Accept": "application/json",
-               "Accept-Encoding": "gzip"}
+               "Accept-Encoding": "gzip", "Connection": "keep-alive"}
     body = None
     if method == "POST":
         headers["Content-Type"] = "application/json"
@@ -386,43 +425,61 @@ def _py_json(url, method="GET", data=None, use_cookies=False):
     cookies = _read_cookies() if use_cookies else {}
     if cookies:
         headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
-    conn = None
-    try:
-        raw = _raw_connect(host, port)
-        ctx = ssl.create_default_context()
-        ss = ctx.wrap_socket(raw, server_hostname=host)
-        ss.settimeout(20)
-        conn = http.client.HTTPSConnection(host, port, timeout=20)
-        conn.sock = ss
-        conn.request(method, path, body=body, headers=headers)
-        resp = conn.getresponse()
-        raw_body = resp.read()
-        if resp.getheader("Content-Encoding") == "gzip":
+    with _KA_LOCK:
+        for _attempt in range(2):  # ke-2 hanya kalau koneksi lama mati
+            conn = _KA_CONN.get((host, port))
+            if conn is not None:
+                try:
+                    if conn.sock is None or conn.sock.fileno() == -1:
+                        raise OSError("koneksi keep-alive sudah tertutup")
+                except OSError:
+                    _ka_drop(host, port)
+                    conn = None
+            if conn is None:
+                try:
+                    conn = _ka_fresh_conn(host, port)
+                except (OSError, socket.timeout, ssl.SSLError,
+                        http.client.HTTPException) as e:
+                    raise _RetryableError(f"http {method} {url} gagal: {e}")
+            else:
+                _KA_STATS["reused"] += 1
             try:
-                raw_body = gzip.decompress(raw_body)
-            except (OSError, EOFError) as e:
-                raise _RetryableError(f"http {method} {url} gagal dekompresi gzip: {e}")
-        if use_cookies:
-            new = {}
-            for k, v in resp.getheaders():
-                if k.lower() == "set-cookie":
-                    pair = v.split(";", 1)[0]
-                    if "=" in pair:
-                        name, val = pair.split("=", 1)
-                        new[name.strip()] = val.strip()
-            if new:
-                cookies.update(new)
-                _write_cookies(cookies)
-        code = resp.status
-    except (OSError, socket.timeout, ssl.SSLError,
-            http.client.HTTPException) as e:
-        raise _RetryableError(f"http {method} {url} gagal: {e}")
-    finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:
-                pass
+                conn.request(method, path, body=body, headers=headers)
+                resp = conn.getresponse()
+                raw_body = resp.read()
+                if resp.getheader("Content-Encoding") == "gzip":
+                    try:
+                        raw_body = gzip.decompress(raw_body)
+                    except (OSError, EOFError) as e:
+                        raise _RetryableError(
+                            f"http {method} {url} gagal dekompresi gzip: {e}")
+                if use_cookies:
+                    new = {}
+                    for k, v in resp.getheaders():
+                        if k.lower() == "set-cookie":
+                            pair = v.split(";", 1)[0]
+                            if "=" in pair:
+                                name, val = pair.split("=", 1)
+                                new[name.strip()] = val.strip()
+                    if new:
+                        cookies.update(new)
+                        _write_cookies(cookies)
+                code = resp.status
+                # Server menutup koneksi sesudah balasan ini: jangan
+                # pakai ulang, buang supaya request berikut buka baru.
+                try:
+                    if resp.will_close:
+                        _ka_drop(host, port)
+                except Exception:
+                    pass
+                break
+            except (OSError, socket.timeout, ssl.SSLError,
+                    http.client.HTTPException) as e:
+                _ka_drop(host, port)
+                if _attempt == 0:
+                    _KA_STATS["reconnect"] += 1
+                    continue
+                raise _RetryableError(f"http {method} {url} gagal: {e}")
     if code >= 400:
         try:
             err = json.loads(raw_body)
