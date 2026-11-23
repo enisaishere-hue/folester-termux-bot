@@ -1156,8 +1156,25 @@ def main():
     log(f"wallet={wallet} (alamat saja yang dicatat, keypair tidak pernah dicatat)")
     if not acquire_lock(wallet):
         return 2
-    sign_in(wallet, seed)
-    player = ensure_joined(wallet)
+    # Login awal: kalau server Folester lagi down (HTTP 502/503 dsb.) atau
+    # jaringan putus, JANGAN keluar — tunggu 60 dtk lalu coba login lagi,
+    # tanpa batas, sampai server pulih. Bot baru berhenti kalau errornya
+    # fatal (4xx: signature salah, wallet banned, tidak lolos syarat,
+    # pesan login tidak dikenal) — itu dilempar sebagai RuntimeError biasa
+    # dan tetap BERHENTI seperti dulu.
+    # Alasan: 2026-11-23 ~19:02 WIB server Folester 502 di SEMUA endpoint
+    # (home/nonce/frames, Cloudflare 502 Bad Gateway), bot sudah retry 5x
+    # di http_json lalu BERHENTI, padahal yang mati servernya — bot harus
+    # tetap hidup supaya langsung jalan lagi begitu server pulih, tanpa
+    # Berly harus restart manual. Ctrl+C tetap mematikan bot.
+    while True:
+        try:
+            sign_in(wallet, seed)
+            player = ensure_joined(wallet)
+            break
+        except _RetryableError as e:
+            log(f"Folester lagi down / jaringan gagal saat login ({e}), coba lagi 60 dtk lagi — bot tetap jalan")
+            time.sleep(60)
     balance = float(player.get("balance") or 0)
     log(f"pengaturan: amount={a.amount:g} ANUL, beli {a.buy_delay:g} dtk setelah launch, "
         f"auto-sell {a.auto_sell_delay:g} dtk, interval {a.interval:g} dtk, max {a.max_buys}x, budget {a.budget:g}, reserve {a.reserve:g}")
