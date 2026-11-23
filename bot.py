@@ -1458,7 +1458,12 @@ def main():
         # Refresh saldo tiap 60 dtk dari server (request kecil, bukan daftar
         # Frame 1 MB): saldo di heartbeat tidak lagi basi berjam-jam, dan
         # jeda karena saldo habis bisa pulih sendiri tanpa restart.
-        if time.monotonic() - last_balance_refresh >= 60:
+        # WARM-UP PATCH: refresh DITUNDA kalau ada retry beli yang jatuh
+        # tempo <5 dtk lagi — get_me di sini bisa memblokir loop utama
+        # ~1 dtk dan bikin retry umur 30 dtk telat.
+        _refresh_soon = any(
+            p["next_try"] - time.monotonic() < 5.0 for p in pending.values())
+        if time.monotonic() - last_balance_refresh >= 60 and not _refresh_soon:
             last_balance_refresh = time.monotonic()
             try:
                 balance = _balance_from_me(get_me(wallet), balance)
@@ -1478,7 +1483,12 @@ def main():
                 extra += f" | JEDA: {state['paused_reason']}"
             if state.get("last_buy_error") and time.monotonic() - state.get("last_buy_error_at", 0) < 300:
                 extra += f" | gagal terakhir: {state['last_buy_error'][:60]}"
-            log(f"memantau... cek ke-{polls} | Frame terbaru: {latest_name} ({age_s}) | beli: {buys} | saldo: {balance:.2f} ANUL (perkiraan){ws_bit}{extra}")
+            ka_bit = ""
+            if _KA_STATS["fresh"] or _KA_STATS["reused"]:
+                ka_bit = (f" | ka: {_KA_STATS['fresh']} baru/"
+                          f"{_KA_STATS['reused']} pakai-ulang/"
+                          f"{_KA_STATS['reconnect']} sambung-ulang")
+            log(f"memantau... cek ke-{polls} | Frame terbaru: {latest_name} ({age_s}) | beli: {buys} | saldo: {balance:.2f} ANUL (perkiraan){ws_bit}{extra}{ka_bit}")
             last_beat = time.monotonic()
         # 1. Jalur websocket: Frame yang masuk live diproses dulu (paling cepat).
         # Loop ini bangun tiap 0.05 dtk supaya antrean WS langsung diproses,
@@ -1493,6 +1503,23 @@ def main():
             if process_frame(f, now, is_live=True):
                 ws_stop.set()
                 return 0
+        # 2a. PEMANASAN (WARM-UP PATCH): kalau ada retry beli yang jatuh
+        # tempo <=1,5 dtk lagi dan koneksinya belum dipanaskan untuk Frame
+        # ini, kirim satu request kecil (get_me) SEKARANG. Tujuannya
+        # supaya koneksi keep-alive hangat / tersambung ulang SEBELUM
+        # detik 30 — bukan pas detik 30, saat sambung-ulang + TLS bisa
+        # makan ~1 dtk dan harga sudah naik 3x. Sekali per Frame saja;
+        # gagal pemanasan tidak menghentikan apa pun (retry tetap jalan).
+        for _p in list(pending.values()):
+            _dt = _p["next_try"] - time.monotonic()
+            if 0 < _dt <= 1.5 and not _p.get("warmed"):
+                _p["warmed"] = True
+                try:
+                    get_me(wallet)
+                    log(f"pemanasan koneksi {_p['frame']['name']} OK")
+                except Exception as e:
+                    log(f"pemanasan koneksi {_p['frame']['name']} gagal "
+                        f"({e}), retry tetap jalan")
         # 2. Retry Frame yang masih launch_wait (tanpa blokir deteksi baru).
         if retry_pending(now):
             ws_stop.set()
@@ -1501,10 +1528,12 @@ def main():
         process_sells()
         # 4. Jalur polling cadangan tiap a.interval detik: daftar lengkap,
         # kalau WS ketinggalan. DITUNDA kalau ada retry yang jatuh tempo
-        # <3 dtk lagi — fetch polling 1 MB / 2-3 dtk akan memblokir retry
-        # di jendela buka 30 dtk dan bikin bot kalah balapan.
+        # <10 dtk lagi — fetch polling 1 MB / 2-3 dtk akan memblokir retry
+        # di jendela buka 30 dtk dan bikin bot kalah balapan. (WARM-UP
+        # PATCH: 3 -> 10 dtk, karena fetch yang mulai di umur 27 dtk
+        # pun masih bisa menunda retry umur 30 dtk.)
         _retry_soon = any(
-            p["next_try"] - time.monotonic() < 3.0 for p in pending.values())
+            p["next_try"] - time.monotonic() < 10.0 for p in pending.values())
         if time.monotonic() - last_poll >= a.interval and not _retry_soon:
             last_poll = time.monotonic()
             try:
