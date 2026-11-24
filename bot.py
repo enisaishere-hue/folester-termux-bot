@@ -1650,6 +1650,16 @@ def main():
                 log(f"once selesai: buys={buys} spent={spent:.2f}")
                 ws_stop.set()
                 return 0
+        # SPEED-3: spin-wait 0,1 dtk terakhir sebelum retry beli — jangan
+        # tidur 0,05 dtk dan kelewatan target sampai 50 ms. Loop ini muter
+        # kosong (tanpa tidur) sampai waktunya tiba, lalu langsung balik ke
+        # atas loop (retry_pending) tanpa tidur. CPU yang dipakai cuma
+        # ~0,1 dtk per Frame, jadi tidak boros baterai.
+        _spin_until = min((p["next_try"] for p in pending.values()), default=None)
+        if _spin_until is not None and 0 < _spin_until - time.monotonic() <= 0.1:
+            while time.monotonic() < _spin_until:
+                pass
+            continue
         time.sleep(0.05)
 
 
