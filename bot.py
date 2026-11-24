@@ -167,7 +167,8 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 
 BASE = "https://www.folester.xyz"
@@ -538,22 +539,30 @@ def _curl_json(url, method="GET", data=None, use_cookies=False):
         raise RuntimeError(f"balasan bukan JSON dari {url}: {body[:200]}")
 
 
-def http_json(url, method="GET", data=None, use_cookies=False):
+def http_json(url, method="GET", data=None, use_cookies=False, fast=False, curl_only=False):
     """Request JSON: coba Python murni dulu, kalau gagal coba curl.
     Gagal sesaat dicoba ulang (5x, jeda 1/2/4/8 dtk); error 4xx (login salah,
-    tidak lolos syarat, dsb.) langsung gagal supaya tidak buang waktu."""
+    tidak lolos syarat, dsb.) langsung gagal supaya tidak buang waktu.
+    fast=True (SPEED-2, khusus trade): cuma 2 percobaan tanpa jeda tidur —
+    kalau gagal sesaat, biarkan loop burst 0,2 dtk yang mencoba ulang,
+    bukan tidur 1/2/4/8 dtk di dalam sini. curl_only=True (SPEED-2, khusus
+    polling): cuma lewat curl, supaya fetch daftar Frame 1 MB tidak memegang
+    _KA_LOCK dan memblokir trade di koneksi keep-alive."""
     last_err = RuntimeError(f"http {method} {url} gagal tanpa balasan")
-    for attempt in range(1, RETRY_ATTEMPTS + 1):
-        for backend in (_py_json, _curl_json):
+    backends = (_curl_json,) if curl_only else (_py_json, _curl_json)
+    attempts = 2 if fast else RETRY_ATTEMPTS
+    for attempt in range(1, attempts + 1):
+        for backend in backends:
             try:
                 return backend(url, method, data, use_cookies)
             except _RetryableError as e:
                 last_err = e
                 continue
-        if attempt < RETRY_ATTEMPTS:
-            wait = 2 ** (attempt - 1)
-            log(f"jaringan gagal ({last_err}), coba lagi {attempt + 1}/{RETRY_ATTEMPTS} setelah {wait} dtk")
-            time.sleep(wait)
+        if attempt < attempts:
+            wait = 0 if fast else 2 ** (attempt - 1)
+            if wait:
+                log(f"jaringan gagal ({last_err}), coba lagi {attempt + 1}/{attempts} setelah {wait} dtk")
+                time.sleep(wait)
     raise last_err
 
 
@@ -934,7 +943,9 @@ def ensure_joined(wallet):
 # Pantau + beli
 # ---------------------------------------------------------------------------
 def fetch_frames():
-    d = http_json(f"{BASE}/api/play/frames?sort=created_at&q=")
+    # SPEED-2: polling HANYA lewat curl — fetch 1 MB ini tidak boleh
+    # memegang _KA_LOCK / koneksi keep-alive yang dipakai trade.
+    d = http_json(f"{BASE}/api/play/frames?sort=created_at&q=", curl_only=True)
     frames = sorted(d.get("frames", []), key=lambda f: f["created_at"])
     return frames
 
@@ -1015,6 +1026,25 @@ def _not_first_reason(latest, fid, initial):
     return None
 
 
+def _server_time_offset():
+    """Selisih jam server Folester vs jam HP (detik; >0 = jam HP tertinggal).
+    Diukur sekali saat start dari header Date balasan HEAD https://folester.xyz.
+    Umur Frame dihitung dari created_at server, jadi jam HP yang meleset 1 dtk
+    membuat tembakan umur 30,0 dtk mendarat di umur server 31 dtk — kalah
+    start. Gagal ukur / selisih >5 menit = 0 (jangan pakai angka mencurigakan)."""
+    try:
+        out = subprocess.run(["curl", "-s", "-I", "--max-time", "10", BASE],
+                             capture_output=True, text=True, timeout=15)
+        for line in out.stdout.splitlines():
+            if line.lower().startswith("date:"):
+                srv = parsedate_to_datetime(line[5:].strip())
+                off = srv.timestamp() - time.time()
+                return off if abs(off) <= 300 else 0.0
+    except Exception:
+        pass
+    return 0.0
+
+
 def _log_pause(state, reason):
     """Catat alasan jeda beli, paling sering 60 dtk sekali supaya log
     tidak banjir — bot tetap hidup dan memantau."""
@@ -1052,7 +1082,10 @@ def _do_trade(frame, side, amount, wallet, seed, state):
     reauth_tried = False
     for _attempt in range(2):  # percobaan ke-2 hanya sesudah login ulang
         try:
-            r = http_json(f"{BASE}/api/play/trade", method="POST", data=body, use_cookies=True)
+            # SPEED-2: fast=True — gagal sesaat langsung kembali sebagai
+            # 'retryable' supaya loop burst 0,2 dtk yang mencoba ulang,
+            # bukan tidur 1/2/4/8 dtk di dalam http_json.
+            r = http_json(f"{BASE}/api/play/trade", method="POST", data=body, use_cookies=True, fast=True)
         except RuntimeError as e:
             msg = str(e)
             if "launch_wait" in msg:
@@ -1275,6 +1308,10 @@ def main():
     elif balance - a.amount < a.reserve:
         log(f"PERINGATAN: saldo {balance:.2f} ANUL di bawah reserve+amount — "
             f"bot memantau dulu, beli jalan otomatis kalau saldo pulih.")
+    # SPEED-2: ukur selisih jam HP vs server sekali saat start; semua umur
+    # Frame di loop utama dikoreksi dengan angka ini (lihat `now = ...`).
+    time_offset = _server_time_offset()
+    log(f"jam HP vs server: selisih {time_offset:+.1f} dtk (umur Frame dikoreksi)")
     if a.check_only:
         log("check-only selesai, tidak ada pembelian")
         return 0
@@ -1328,15 +1365,24 @@ def main():
         buys += 1
         spent += a.amount
         state["paused_reason"] = ""
-        try:
-            balance = _balance_from_me(get_me(wallet), balance - a.amount)
-        except Exception as e:
-            # Saldo gagal dibaca sesudah beli JANGAN mematikan bot: pakai
-            # perkiraan (saldo lama - amount), refresh berikutnya (tiap
-            # 60 dtk) akan meluruskan lagi dari server.
-            log(f"saldo gagal diperbarui sesudah BUY {f['name']}: {e} "
-                f"(pakai perkiraan {balance - a.amount:.2f})")
+        # SPEED-2: sesudah beli, JANGAN panggil get_me kalau ada retry beli
+        # lain yang jatuh tempo <5 dtk lagi — get_me memegang _KA_LOCK dan
+        # memblokir loop ~0,5-1 dtk, bisa menunda tembakan Frame berikutnya
+        # (kasus 3 Frame launching berbarengan: CUTIE/NVIDIA/FLUFFY).
+        # Saldo cukup dikurangi amount; refresh 60 dtk akan meluruskan.
+        _retry_soon = any(p["next_try"] - time.monotonic() < 5.0 for p in pending.values())
+        if _retry_soon:
             balance -= a.amount
+        else:
+            try:
+                balance = _balance_from_me(get_me(wallet), balance - a.amount)
+            except Exception as e:
+                # Saldo gagal dibaca sesudah beli JANGAN mematikan bot: pakai
+                # perkiraan (saldo lama - amount), refresh berikutnya (tiap
+                # 60 dtk) akan meluruskan lagi dari server.
+                log(f"saldo gagal diperbarui sesudah BUY {f['name']}: {e} "
+                    f"(pakai perkiraan {balance - a.amount:.2f})")
+                balance -= a.amount
         schedule_sell(f, r)
 
     def process_frame(f, now, is_live=False):
@@ -1533,7 +1579,7 @@ def main():
         # Loop ini bangun tiap 0.05 dtk supaya antrean WS langsung diproses,
         # tidak menunggu polling 30 detik. (SPEED PATCH: 0.2 -> 0.05 dtk,
         # supaya retry umur 30,0 dtk tidak telat sampai 0,2 dtk.)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc) + timedelta(seconds=time_offset)
         while True:
             try:
                 f = ws_queue.get_nowait()
@@ -1584,7 +1630,7 @@ def main():
                     return 1
             else:
                 polls += 1
-                now = datetime.now(timezone.utc)
+                now = datetime.now(timezone.utc) + timedelta(seconds=time_offset)
                 # Frame WS yang masuk selama fetch polling (1 MB, 2-3 dtk)
                 # diproses dulu — jangan tunggu putaran loop berikut.
                 while True:
