@@ -308,15 +308,46 @@ def base58_decode(s):
 _LOG_LOCK = threading.Lock()
 
 
+_LOG_F = None
+
+
+def _log_open():
+    """Handle file log persisten (MAX PATCH): dulu tiap log() membuka +
+    menutup bot.log (open/write/close) — beberapa milidetik per baris,
+    termasuk baris 'retry BUY' yang ditulis TEPAT SEBELUM trade dikirim.
+    Sekarang file dibuka sekali dan dipakai ulang (flush tiap baris, jadi
+    tidak ada yang hilang kalau bot mati). Kalau file dihapus di tengah
+    jalan, handle dibuka ulang. Gagal buka = None (caller pakai cara lama)."""
+    global _LOG_F
+    try:
+        if _LOG_F is None or _LOG_F.closed or not os.path.exists(LOG_FILE):
+            try:
+                if _LOG_F is not None:
+                    _LOG_F.close()
+            except Exception:
+                pass
+            _LOG_F = open(LOG_FILE, "a")
+    except OSError:
+        _LOG_F = None
+    return _LOG_F
+
+
 def log(msg):
     line = f"{datetime.now(timezone.utc).isoformat()} {msg}"
     with _LOG_LOCK:
         print(line, flush=True)
         try:
-            with open(LOG_FILE, "a") as f:
-                f.write(line + "\n")
+            f = _log_open()
+            if f is None:
+                raise OSError("log tidak bisa dibuka")
+            f.write(line + "\n")
+            f.flush()
         except OSError:
-            pass
+            try:
+                with open(LOG_FILE, "a") as f:
+                    f.write(line + "\n")
+            except OSError:
+                pass
 
 
 # Berapa kali request dicoba ulang kalau jaringannya gagal sesaat (DNS, putus,
@@ -583,13 +614,27 @@ WS_PATH = "/api/live"
 _WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
+def _nodelay(s):
+    """Matikan algoritma Nagle di soket ini (SPEED-4): request kecil (POST
+    trade ~300 byte) dikirim http.client dalam 2x send (header lalu body);
+    tanpa TCP_NODELAY, send kedua bisa tertahan sampai ~40 ms menunggu ACK
+    send pertama. Efeknya cuma beberapa milidetik, tapi di balapan detik 30
+    tiap milidetik dihitung. Gagal set = abaikan, bukan error."""
+    try:
+        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except (OSError, AttributeError):
+        pass
+
+
 def _raw_connect(host, port):
     """Koneksi TCP. Coba langsung dulu; kalau gagal dan ada proxy di env
     (VM Muse), lewat CONNECT proxy itu. Di Termux tidak ada proxy env,
     jadi selalu langsung. Kredensial proxy dibaca dari env saat jalan,
     tidak pernah dicetak atau disimpan."""
     try:
-        return socket.create_connection((host, port), timeout=15)
+        s = socket.create_connection((host, port), timeout=15)
+        _nodelay(s)
+        return s
     except (OSError, socket.timeout) as first_err:
         proxy = os.environ.get("https_proxy") or os.environ.get("HTTPS_PROXY")
         if not proxy:
@@ -614,6 +659,7 @@ def _raw_connect(host, port):
         if b" 200 " not in buf.split(b"\r\n")[0]:
             s.close()
             raise RuntimeError("proxy CONNECT gagal")
+        _nodelay(s)
         return s
 
 
@@ -964,8 +1010,13 @@ LAUNCH_OPEN_AGE = 30.0
 # TEPAT umur 30,0 dtk, lalu burst retry tiap 0,2 dtk sampai umur 35 dtk,
 # baru melambat ke 0,5 dtk. Itu ~26 percobaan di jendela buka, vs 1x di
 # versi lama (30,5 dtk sekali).
+# MAX PATCH 24 Nov 2026 (Berly: "paling cepat sampai batas maksimum"):
+# burst 0,2 -> 0,1 dtk (~50 percobaan di jendela 30-35 dtk). Hanya jalan
+# kalau percobaan pertama masih launch_wait; kalau sudah berhasil beli,
+# burst berhenti. Risiko: server bisa rate-limit kalau kebanyakan request
+# — error rate_limited sudah ditangani sebagai 'retryable' (antre ulang).
 OPEN_BURST_END = 35.0
-OPEN_BURST_RETRY = 0.2
+OPEN_BURST_RETRY = 0.1
 # Error trade yang sifatnya sementara: antre ulang, jangan buang Frame-nya.
 RETRYABLE_TRADE_ERRORS = {
     "rate_limited", "too_many_requests", "server_busy", "try_again_later",
@@ -1576,9 +1627,10 @@ def main():
             log(f"memantau... cek ke-{polls} | Frame terbaru: {latest_name} ({age_s}) | beli: {buys} | saldo: {balance:.2f} ANUL (perkiraan){ws_bit}{extra}{ka_bit}")
             last_beat = time.monotonic()
         # 1. Jalur websocket: Frame yang masuk live diproses dulu (paling cepat).
-        # Loop ini bangun tiap 0.05 dtk supaya antrean WS langsung diproses,
+        # Loop ini bangun tiap 0.01 dtk supaya antrean WS langsung diproses,
         # tidak menunggu polling 30 detik. (SPEED PATCH: 0.2 -> 0.05 dtk,
-        # supaya retry umur 30,0 dtk tidak telat sampai 0,2 dtk.)
+        # MAX PATCH: 0.05 -> 0.01 dtk — deteksi WS sampai 40 ms lebih cepat;
+        # biaya baterai kecil, loop tiap putaran cuma cek antrean kosong.)
         now = datetime.now(timezone.utc) + timedelta(seconds=time_offset)
         while True:
             try:
@@ -1660,7 +1712,7 @@ def main():
             while time.monotonic() < _spin_until:
                 pass
             continue
-        time.sleep(0.05)
+        time.sleep(0.01)
 
 
 if __name__ == "__main__":
