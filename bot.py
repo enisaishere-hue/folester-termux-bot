@@ -994,6 +994,27 @@ def _launch_wait_delay(created, now):
     return 0.5
 
 
+def _not_first_reason(latest, fid, initial):
+    """Alasan SKIP kalau bot sudah bukan pembeli pertama (SKIP-IF-NOT-FIRST
+    PATCH): data Frame terbaru (dari WS/poll) menunjukkan sudah ada yang
+    beli duluan — harga sudah naik dan pembeli pertama itulah yang akan
+    menjual ke kita (pola MOONBEAM 24 Nov: FNrw beli 200 ANUL, jual
+    370 ANUL setelah bot beli). Kembalikan None kalau masih aman dibeli.
+    `latest` = dict frame_id -> objek Frame terbaru; `initial` = objek
+    Frame saat pertama terdeteksi (harga awal, trades=0)."""
+    fresh = latest.get(fid)
+    if fresh is None or fresh is initial:
+        return None
+    trades = _num(fresh.get("trades", 0))
+    price = _num(fresh.get("price", 0))
+    start = _num(initial.get("price", 0))
+    if trades > 0:
+        return f"sudah ada {trades:g} trade, harga {price:.6f}"
+    if start > 0 and price > start * 1.5:
+        return f"harga naik {price / start:.1f}x dari {start:.6f} ke {price:.6f}"
+    return None
+
+
 def _log_pause(state, reason):
     """Catat alasan jeda beli, paling sering 60 dtk sekali supaya log
     tidak banjir — bot tetap hidup dan memantau."""
@@ -1260,6 +1281,7 @@ def main():
 
     seen = set()
     pending = {}  # frame_id -> {frame, created, next_try}: antre retry launch_wait
+    latest_by_id = {}  # frame_id -> objek Frame TERBARU (WS/poll), untuk cek bukan-pertama
     pending_sells = {}  # frame_id -> {frame, amount, next_try, deadline}: antre auto-sell
     spent, buys = 0.0, 0
     state = {"reauth_done": False, "last_pause_log": 0.0,
@@ -1324,6 +1346,11 @@ def main():
         beli (saldo/reserve/budget/max_buys, terlalu dini, launch_wait),
         Frame dijadwalkan ulang ke antrean dan bot tetap memantau."""
         nonlocal buys, spent, balance, latest_ts, latest_name
+        # SKIP-IF-NOT-FIRST PATCH: simpan SELALU data Frame terbaru, walau
+        # id sudah seen — update WS/poll sesudah deteksi pertama (mis. trade
+        # pembeli lain) harus tercatat, kalau tidak bot membeli buta dengan
+        # data lama (harga 0,001 / trades=0) padahal harga sudah naik.
+        latest_by_id[f["id"]] = f
         ts = f.get("created_at") or ""
         if ts > latest_ts:
             latest_ts = ts
@@ -1361,6 +1388,10 @@ def main():
             return False
         src = "WS" if is_live else "poll"
         log(f"FRAME BARU {f['name']} umur={age:.1f} dtk harga={f['price']:.6f} ANUL trades={f.get('trades', 0)} [{src}]")
+        skip = _not_first_reason(latest_by_id, f["id"], f)
+        if skip:
+            log(f"SKIP {f['name']}: bukan pembeli pertama — {skip}, tidak beli")
+            return False
         status, r = buy(f, a.amount, wallet, seed, state)
         if status == "ok":
             on_buy_success(f, r)
@@ -1400,6 +1431,14 @@ def main():
             if reason:
                 _log_pause(state, reason)
                 p["next_try"] = time.monotonic() + 10
+                continue
+            # SKIP-IF-NOT-FIRST PATCH: sebelum tembak di umur 30 dtk, cek
+            # data terbaru — kalau ada yang sudah beli duluan (trades>0 /
+            # harga naik >1,5x), jangan jadi exit liquidity mereka.
+            skip = _not_first_reason(latest_by_id, fid, p["frame"])
+            if skip:
+                log(f"SKIP {p['frame']['name']}: bukan pembeli pertama — {skip}, tidak beli")
+                del pending[fid]
                 continue
             log(f"retry BUY {p['frame']['name']} (umur {age:.0f} dtk)")
             status, r = buy(p["frame"], a.amount, wallet, seed, state)
